@@ -43,10 +43,14 @@ class Hub:
         self.queues: set[asyncio.Queue] = set()
 
     def publish(self, msg: dict) -> None:
-        if self.loop is None:
+        loop = self.loop
+        if loop is None:
             return
         text = json.dumps(msg, ensure_ascii=False)
-        self.loop.call_soon_threadsafe(self._fanout, text)
+        try:
+            loop.call_soon_threadsafe(self._fanout, text)
+        except RuntimeError:  # сервер останавливается, цикл событий уже закрыт — конвейер мог не успеть встать
+            pass
 
     def _fanout(self, text: str) -> None:
         for q in list(self.queues):
@@ -136,6 +140,7 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
 
     @app.on_event("shutdown")
     async def _shutdown():
+        hub.loop = None
         pipeline.stop()
         for src in registry.sources.values():
             src.stop()
