@@ -95,6 +95,12 @@ REST: `GET/POST /api/objects/` (режим, классы), `POST /api/objects/re
 Одна строка — одно сообщение: первая строка `hello`, дальше `frame`. Тот же формат, что в WebSocket,
 поэтому `python run.py --replay файл.jsonl` проигрывает запись во вьювер, а фронтенд может читать файл напрямую.
 
+### Восстановление траекторий и экспорт
+Запись можно «восстановить» (сшивка обрывков, сглаживание вперёд-назад, заполнение пропусков на сетке 30 Гц)
+и выгрузить в CSV `t, kind, id, x, y, z, vx, vy, vz, speed, source, std` или JSON — сырые и восстановленные данные:
+блок «Траектории» во вьювере, `GET /api/trajectory/sessions | restore | export`, `scripts/restore_session.py`.
+Подробно — [trajectory.md](trajectory.md).
+
 ## REST
 | Метод | Путь | Что делает |
 |---|---|---|
