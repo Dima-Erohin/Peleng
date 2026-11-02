@@ -63,6 +63,7 @@
   <label class="chk"><input type="checkbox" id="chkSkel" checked> скелеты</label>
   <h2>Запись</h2>
   <div class="btns"><button id="btnRec">● Записать сессию</button></div>
+  <div id="ext"></div>
   <h2>Журнал</h2>
   <div id="log"></div>
 </aside>
@@ -384,6 +385,7 @@ function connect() {
   const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/stream`);
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
+    for (const fn of peleng.hooks[m.type] || []) { try { fn(m); } catch (e) { console.error(e); } }
     if (m.type === "hello") {
       hudInfo = { mode: m.mode, detector: m.detector };
       drawBoard(m.board); drawRoom(m.room); drawCameras(m.cameras); renderCams();
@@ -422,6 +424,29 @@ function renderCamsLight(list) {
 }
 
 renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+
+// ---------------------------------------------------------------- расширения (web/ext/*.js)
+// Скрипт расширения — ES-модуль; берёт всё нужное из window.peleng:
+//   peleng.on(<type сообщения>, fn)          — "hello", "frame", "cameras", … и свои типы с сервера
+//   peleng.addSection(title) -> <div>        — свой блок в правой панели
+//   peleng.THREE, scene, camera, controls, log, colorFor, textSprite
+window.peleng = {
+  THREE, scene, camera, controls, log, colorFor, textSprite,
+  hooks: {},
+  addSection(title) {
+    const box = document.createElement("div");
+    box.innerHTML = `<h2></h2>`;
+    box.querySelector("h2").textContent = title;
+    $("ext").appendChild(box);
+    return box;
+  },
+};
+window.peleng.on = (type, fn) => (window.peleng.hooks[type] ||= []).push(fn);
+fetch("/api/ext").then(r => r.json()).then(async (files) => {
+  for (const f of files) {
+    try { await import(`/static/ext/${f}`); } catch (e) { log(`расширение ${f}: ${e.message}`); }
+  }
+});
 </script>
 </body>
 </html>
