@@ -1,0 +1,494 @@
+"""HTTP/WebSocket-сервер.
+
+  GET  /                    — 3D-вьювер + панель управления (для ноутбука)
+  GET  /cam                 — страница-камера для телефона (открыть в браузере телефона)
+  WS   /ws/push/{cam_id}    — приём кадров с телефона
+  WS   /ws/stream           — поток результатов для фронтенда (формат: docs/data-format.md)
+  REST /api/...             — калибровка, сканирование комнаты, запись
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import struct
+import threading
+import time
+from pathlib import Path
+
+import cv2
+import numpy as np
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
+
+from .calibration import Board, calibrate_intrinsics, solve_extrinsics
+from .config import BACKEND_DIR, DATA_DIR
+from .geometry import CameraModel
+from .pipeline import Pipeline
+from .pose import SKELETON
+from .room import scan_points
+from .sources import CameraRegistry, OpenCVSource, PushSource
+
+WEB_DIR = BACKEND_DIR / "web"
+
+
+class Hub:
+    """Рассылка сообщений всем подключённым вьюверам (из любого потока)."""
+
+    def __init__(self):
+        self.loop: asyncio.AbstractEventLoop | None = None
+        self.queues: set[asyncio.Queue] = set()
+
+    def publish(self, msg: dict) -> None:
+        if self.loop is None:
+            return
+        text = json.dumps(msg, ensure_ascii=False)
+        self.loop.call_soon_threadsafe(self._fanout, text)
+
+    def _fanout(self, text: str) -> None:
+        for q in list(self.queues):
+            if q.full():
+                try:
+                    q.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            q.put_nowait(text)
+
+
+def _null_detector(batch):
+    return [[] for _ in batch]
+
+
+def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_dir: Path = DATA_DIR) -> FastAPI:
+    data_dir = Path(data_dir)
+    board = Board(cfg["board"])
+    registry = CameraRegistry(data_dir / "calib", cfg.get("default_hfov_deg", 68.0))
+    hub = Hub()
+    state: dict = {"room_points": None, "intr_jobs": {}, "mode": "replay" if replay else ("demo" if demo else "live")}
+
+    detector_box: dict = {"fn": _null_detector, "status": "нет"}
+    demo_world = None
+    if demo:
+        from .demo import DemoDetector, DemoSource, DemoWorld
+
+        demo_world = DemoWorld(n_cams=int(cfg.get("demo", {}).get("cameras", 3)), n_people=int(cfg.get("demo", {}).get("people", 2)))
+        for cid, m in demo_world.cams.items():
+            registry.add(DemoSource(cid, demo_world))
+            registry.set_model(cid, m, save=False)
+        detector_box["fn"] = DemoDetector(demo_world)
+        detector_box["status"] = "demo"
+        if cfg.get("room", {}).get("size_m") is None:
+            cfg.setdefault("room", {})["size_m"] = list(demo_world.room)
+    elif not replay:
+        for c in cfg.get("cameras", []):
+            registry.add(OpenCVSource(c["id"], c["source"], c.get("name"), c.get("width"), c.get("height")), c.get("hfov_deg"))
+
+    pipeline = Pipeline(cfg, registry, lambda b: detector_box["fn"](b), hub.publish, data_dir / "sessions")
+
+    def hello() -> dict:
+        return {
+            "type": "hello",
+            "mode": state["mode"],
+            "server_time": time.time(),
+            "cameras": registry.describe(),
+            "board": {**board.to_dict(), "corners_world": np.round(board.world_corners(), 4).tolist()},
+            "room": cfg.get("room", {}),
+            "detector": detector_box["status"],
+            "recording": pipeline.recording,
+        }
+
+    pipeline.hello_provider = hello
+
+    def load_detector():
+        try:
+            from .pose import YoloPoseDetector
+
+            p = cfg["pose"]
+            print(f"[pose] загрузка модели {p['model']} …")
+            det = YoloPoseDetector(p["model"], p.get("imgsz", 640), p.get("conf", 0.4), p.get("device"))
+            detector_box["fn"] = lambda batch: det([f.image for _, f in batch])
+            detector_box["status"] = f"{p['model']} ({det.device})"
+            print(f"[pose] готово: {detector_box['status']}")
+        except Exception as e:  # noqa: BLE001
+            detector_box["status"] = f"ошибка: {e}"
+            print(f"[pose] YOLO недоступен ({e}). Калибровка работает, детекции людей не будет.")
+
+    app = FastAPI(title="Peleng")
+    app.state.registry = registry
+    app.state.pipeline = pipeline
+    app.state.hub = hub
+    app.state.board = board
+
+    @app.on_event("startup")
+    async def _startup():
+        hub.loop = asyncio.get_running_loop()
+        for src in registry.sources.values():
+            src.start()
+        if replay:
+            threading.Thread(target=_replay_loop, args=(replay,), daemon=True).start()
+            return
+        if not demo:
+            threading.Thread(target=load_detector, daemon=True).start()
+        pipeline.start()
+
+    @app.on_event("shutdown")
+    async def _shutdown():
+        pipeline.stop()
+        for src in registry.sources.values():
+            src.stop()
+
+    def _replay_loop(path: str):
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+        msgs = [json.loads(x) for x in lines if x.strip()]
+        head = next((m for m in msgs if m.get("type") == "hello"), None)
+        frames = [m for m in msgs if m.get("type") == "frame"]
+        if head:
+            state["replay_hello"] = head
+        print(f"[replay] {len(frames)} кадров из {path}")
+        while True:
+            if not frames:
+                time.sleep(1)
+                continue
+            t_prev = frames[0]["t"]
+            for m in frames:
+                time.sleep(max(0.0, min(1.0, m["t"] - t_prev)))
+                t_prev = m["t"]
+                hub.publish(m)
+
+    # ------------------------------------------------------------------ страницы
+    app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+
+    @app.get("/")
+    async def index():
+        return FileResponse(WEB_DIR / "index.html")
+
+    @app.get("/cam")
+    async def cam_page():
+        return FileResponse(WEB_DIR / "cam.html")
+
+    # ------------------------------------------------------------------ WebSocket
+    @app.websocket("/ws/stream")
+    async def ws_stream(ws: WebSocket):
+        await ws.accept()
+        q: asyncio.Queue = asyncio.Queue(maxsize=10)
+        hub.queues.add(q)
+        try:
+            h = state.get("replay_hello") if replay else None
+            await ws.send_text(json.dumps(h or hello(), ensure_ascii=False))
+            if state["room_points"]:
+                await ws.send_text(json.dumps(state["room_points"]))
+            while True:
+                text = await q.get()
+                await ws.send_text(text)
+        except (WebSocketDisconnect, RuntimeError):
+            pass
+        finally:
+            hub.queues.discard(q)
+
+    @app.websocket("/ws/push/{cam_id}")
+    async def ws_push(ws: WebSocket, cam_id: str):
+        await ws.accept()
+        src = registry.sources.get(cam_id)
+        if not isinstance(src, PushSource):
+            src = PushSource(cam_id)
+            registry.add(src)
+        print(f"[{cam_id}] телефон подключился")
+        hub.publish({"type": "cameras", "cameras": registry.describe()})
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg.get("type") == "websocket.disconnect":
+                    break
+                if msg.get("bytes") is not None:
+                    data = msg["bytes"]
+                    if len(data) < 9:
+                        continue
+                    (ts,) = struct.unpack("<d", data[:8])
+                    img = cv2.imdecode(np.frombuffer(data[8:], np.uint8), cv2.IMREAD_COLOR)
+                    if img is not None:
+                        # защита от грубо неверного времени (часы не синхронизированы)
+                        if abs(ts - time.time()) > 2.0:
+                            ts = time.time()
+                        src.push(img, ts)
+                elif msg.get("text"):
+                    m = json.loads(msg["text"])
+                    if m.get("type") == "ping":
+                        await ws.send_text(json.dumps({"type": "pong", "tc": m.get("tc"), "ts": time.time()}))
+                    elif m.get("type") == "hello":
+                        src.name = m.get("name") or cam_id
+                        src.info = {k: v for k, v in m.items() if k not in ("type", "name")}
+                        if m.get("hfov_deg"):
+                            registry.hfov[cam_id] = float(m["hfov_deg"])
+        except WebSocketDisconnect:
+            pass
+        finally:
+            print(f"[{cam_id}] телефон отключился")
+            hub.publish({"type": "cameras", "cameras": registry.describe()})
+
+    # ------------------------------------------------------------------ состояние
+    @app.get("/api/state")
+    async def api_state():
+        return {**hello(), "pipeline": pipeline.stats, "intrinsics_jobs": state["intr_jobs"]}
+
+    def _src(cam_id: str):
+        src = registry.sources.get(cam_id)
+        if src is None:
+            raise HTTPException(404, f"нет камеры {cam_id}")
+        return src
+
+    def _overlay(cam_id: str, img: np.ndarray, show_board: bool) -> np.ndarray:
+        img = img.copy()
+        ts_dets = pipeline.last_dets.get(cam_id)
+        if ts_dets:
+            for p in ts_dets[1]:
+                x1, y1, x2, y2 = p.bbox.astype(int)
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 200, 255), 2)
+                for i, j in SKELETON:
+                    if p.kc[i] > 0.35 and p.kc[j] > 0.35:
+                        cv2.line(img, tuple(p.kp[i].astype(int)), tuple(p.kp[j].astype(int)), (0, 255, 0), 2)
+        if show_board:
+            det = board.detect(img)
+            if det is not None:
+                for c in det.corners.astype(int):
+                    cv2.circle(img, tuple(c), 4, (255, 0, 255), -1)
+                cv2.putText(img, f"board: {len(det.ids)} corners", (10, img.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+        m = registry.model(cam_id)
+        if m is not None and m.calibrated:
+            # оси мира в начале координат
+            pts = np.array([[0, 0, 0], [0.3, 0, 0], [0, 0.3, 0], [0, 0, 0.3]], float)
+            if (m.depth(pts) > 0.05).all():
+                px = m.project(pts).astype(int)
+                for k, col in zip((1, 2, 3), ((0, 0, 255), (0, 255, 0), (255, 0, 0))):
+                    cv2.line(img, tuple(px[0]), tuple(px[k]), col, 3)
+        return img
+
+    @app.get("/api/cameras/{cam_id}/snapshot.jpg")
+    async def snapshot(cam_id: str, overlay: int = 1, board_overlay: int = 0, width: int = 640):
+        f = _src(cam_id).latest()
+        if f is None:
+            raise HTTPException(503, "кадров ещё нет")
+        img = _overlay(cam_id, f.image, bool(board_overlay)) if overlay else f.image
+        if width and img.shape[1] > width:
+            img = cv2.resize(img, (width, int(img.shape[0] * width / img.shape[1])))
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
+        return Response(buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/cameras/{cam_id}/mjpeg")
+    async def mjpeg(cam_id: str, board_overlay: int = 0, width: int = 640, fps: float = 8.0):
+        src = _src(cam_id)
+
+        async def gen():
+            last = -1
+            while True:
+                f = src.latest()
+                if f is not None and f.seq != last:
+                    last = f.seq
+                    img = await asyncio.to_thread(_overlay, cam_id, f.image, bool(board_overlay))
+                    if img.shape[1] > width:
+                        img = cv2.resize(img, (width, int(img.shape[0] * width / img.shape[1])))
+                    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                    yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n"
+                await asyncio.sleep(1.0 / fps)
+
+        return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
+
+    @app.get("/api/board.png")
+    async def board_png(px_per_square: int = 200):
+        ok, buf = cv2.imencode(".png", board.image(px_per_square))
+        return Response(buf.tobytes(), media_type="image/png")
+
+    # ------------------------------------------------------------------ калибровка
+    def _collect_board(cam_ids: list[str], duration: float = 1.2) -> dict[str, list]:
+        dets: dict[str, list] = {c: [] for c in cam_ids}
+        seen: dict[str, int] = {}
+        t_end = time.time() + duration
+        while time.time() < t_end:
+            for c in cam_ids:
+                f = registry.sources[c].latest()
+                if f is None or seen.get(c) == f.seq:
+                    continue
+                seen[c] = f.seq
+                d = board.detect(f.image)
+                if d is not None:
+                    dets[c].append((f, d))
+            time.sleep(0.03)
+        return dets
+
+    def _do_extrinsics(cam_ids: list[str] | None) -> dict:
+        ids = [c for c in (cam_ids or list(registry.sources)) if c in registry.sources and registry.sources[c].online]
+        if not ids:
+            return {"ok": False, "message": "нет активных камер", "cameras": {}}
+        collected = _collect_board(ids)
+        report = {}
+        for c in ids:
+            items = collected[c]
+            if not items:
+                report[c] = {"ok": False, "message": "доска не видна"}
+                continue
+            f0 = items[-1][0]
+            h, w = f0.image.shape[:2]
+            m = registry.model(c, (w, h))
+            refine = cfg["pipeline"].get("refine_focal_on_extrinsics", False) and m.meta.get("intrinsics") not in ("board", "demo")
+            res = solve_extrinsics(board, m, [d for _, d in items], refine_f=refine)
+            if not res.ok:
+                report[c] = {"ok": False, "message": res.message}
+                continue
+            K = res.K if res.K is not None else m.K
+            meta = dict(m.meta)
+            if res.K is not None:
+                meta["intrinsics"] = "approx+focal"
+            meta.update({"extrinsics_reproj_px": round(res.reproj_px, 2), "extrinsics_time": time.time(), "extrinsics_points": res.n_points})
+            new = CameraModel(K, m.dist, m.size, res.R, res.t, meta)
+            registry.set_model(c, new)
+            report[c] = {
+                "ok": True,
+                "reproj_px": round(res.reproj_px, 2),
+                "points": res.n_points,
+                "frames": len(items),
+                "center": np.round(new.center, 3).tolist(),
+                "dist_to_origin_m": round(float(np.linalg.norm(new.center)), 2),
+                "hfov_deg": round(new.hfov_deg(), 1),
+                "focal_refined": res.K is not None,
+            }
+        pipeline.tracker.reset()
+        hub.publish({"type": "cameras", "cameras": registry.describe()})
+        return {"ok": any(r["ok"] for r in report.values()), "cameras": report}
+
+    @app.post("/api/calib/extrinsics")
+    async def api_extrinsics(body: dict | None = None):
+        cam_ids = (body or {}).get("cameras")
+        return await asyncio.to_thread(_do_extrinsics, cam_ids)
+
+    def _intrinsics_job(cam_id: str, n: int, interval: float):
+        job = state["intr_jobs"][cam_id]
+        dets = []
+        last_corners = None
+        seen = -1
+        size = None
+        t_end = time.time() + max(60.0, n * interval * 6)
+        while len(dets) < n and time.time() < t_end and job["state"] == "collecting":
+            f = registry.sources[cam_id].latest()
+            if f is None or f.seq == seen:
+                time.sleep(0.05)
+                continue
+            seen = f.seq
+            d = board.detect(f.image)
+            if d is not None and len(d.ids) >= 8:
+                # пропускаем почти одинаковые кадры — нужны разные ракурсы
+                if last_corners is None or _moved(last_corners, d) > 0.04 * f.image.shape[1]:
+                    dets.append(d)
+                    last_corners = d
+                    size = (f.image.shape[1], f.image.shape[0])
+                    job["n"] = len(dets)
+                    time.sleep(interval)
+            time.sleep(0.02)
+        if job["state"] != "collecting":
+            return
+        try:
+            K, dist, rms = calibrate_intrinsics(dets, size)
+            old = registry.model(cam_id)
+            meta = {"intrinsics": "board", "intrinsics_rms": round(rms, 3), "intrinsics_views": len(dets)}
+            if old is not None and old.calibrated and tuple(old.size) == tuple(size):
+                new = CameraModel(K, dist, size, old.R, old.t, {**old.meta, **meta})
+            else:
+                new = CameraModel(K, dist, size, meta=meta)
+            registry.set_model(cam_id, new)
+            job.update(state="done", rms=round(rms, 3), hfov_deg=round(new.hfov_deg(), 1))
+            hub.publish({"type": "cameras", "cameras": registry.describe()})
+        except Exception as e:  # noqa: BLE001
+            job.update(state="error", message=str(e))
+
+    @app.post("/api/calib/{cam_id}/intrinsics/start")
+    async def api_intr_start(cam_id: str, body: dict | None = None):
+        _src(cam_id)
+        body = body or {}
+        n = int(body.get("n", 15))
+        state["intr_jobs"][cam_id] = {"state": "collecting", "n": 0, "need": n}
+        threading.Thread(target=_intrinsics_job, args=(cam_id, n, float(body.get("interval", 0.3))), daemon=True).start()
+        return state["intr_jobs"][cam_id]
+
+    @app.post("/api/calib/{cam_id}/intrinsics/cancel")
+    async def api_intr_cancel(cam_id: str):
+        job = state["intr_jobs"].get(cam_id)
+        if job:
+            job["state"] = "cancelled"
+        return job or {}
+
+    @app.get("/api/calib/{cam_id}/intrinsics")
+    async def api_intr_status(cam_id: str):
+        return state["intr_jobs"].get(cam_id, {"state": "idle"})
+
+    @app.post("/api/calib/{cam_id}/reset")
+    async def api_reset(cam_id: str, body: dict | None = None):
+        registry.reset(cam_id, keep_intrinsics=bool((body or {}).get("keep_intrinsics", True)))
+        hub.publish({"type": "cameras", "cameras": registry.describe()})
+        return {"ok": True}
+
+    @app.post("/api/calib/{cam_id}/hfov")
+    async def api_hfov(cam_id: str, body: dict):
+        """Задать угол обзора вручную (если калибровки оптики нет)."""
+        registry.hfov[cam_id] = float(body["hfov_deg"])
+        m = registry.model(cam_id)
+        if m is not None and m.meta.get("intrinsics", "approx") != "board":
+            registry.models.pop(cam_id, None)
+            p = registry.calib_dir / f"{cam_id}.json"
+            if p.exists():
+                p.unlink()
+        hub.publish({"type": "cameras", "cameras": registry.describe()})
+        return {"ok": True}
+
+    # ------------------------------------------------------------------ комната, запись
+    def _do_scan() -> dict:
+        images, cams = {}, {}
+        for c, src in registry.sources.items():
+            f = src.latest()
+            if f is None:
+                continue
+            m = registry.model(c, (f.image.shape[1], f.image.shape[0]))
+            if m is not None and m.calibrated:
+                images[c], cams[c] = f.image, m
+        if len(images) < 2:
+            return {"type": "room_points", "points": [], "colors": [], "pairs": [], "message": "нужно ≥ 2 откалиброванных камер"}
+        res = scan_points(cams, images)
+        state["room_points"] = res
+        hub.publish(res)
+        return res
+
+    @app.post("/api/room/scan")
+    async def api_scan():
+        res = await asyncio.to_thread(_do_scan)
+        return {"points": len(res["points"]), "pairs": res["pairs"], "message": res.get("message", "ok")}
+
+    @app.post("/api/room/clear")
+    async def api_scan_clear():
+        state["room_points"] = None
+        hub.publish({"type": "room_points", "points": [], "colors": [], "pairs": []})
+        return {"ok": True}
+
+    @app.post("/api/record/start")
+    async def api_rec_start():
+        return {"file": pipeline.start_recording()}
+
+    @app.post("/api/record/stop")
+    async def api_rec_stop():
+        return {"file": pipeline.stop_recording()}
+
+    @app.post("/api/tracks/reset")
+    async def api_tracks_reset():
+        pipeline.tracker.reset()
+        return {"ok": True}
+
+    @app.get("/api/demo/truth")
+    async def api_truth():
+        if demo_world is None:
+            raise HTTPException(404, "только в демо-режиме")
+        return JSONResponse({"t": time.time(), "people": [np.round(p, 3).tolist() for p, _ in demo_world.people(time.time())]})
+
+    return app
+
+
+def _moved(a, b) -> float:
+    common, ia, ib = np.intersect1d(a.ids, b.ids, return_indices=True)
+    if len(common) < 4:
+        return 1e9
+    return float(np.linalg.norm(a.corners[ia] - b.corners[ib], axis=1).mean())

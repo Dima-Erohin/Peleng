@@ -1,0 +1,115 @@
+# Формат данных (бэкенд ↔ фронтенд)
+
+Единицы — **метры, секунды**. Система координат мира: **Z вверх**, пол — плоскость `z = 0`.
+Начало координат — **центр доски ChArUco** при калибровке; ось X идёт вдоль длинной стороны доски.
+Three.js по умолчанию Y-up: либо ставить `THREE.Object3D.DEFAULT_UP.set(0,0,1)` (так сделано во вьювере `backend/web/index.html`),
+либо конвертировать `(x, y, z) → (x, z, -y)`.
+
+## WebSocket `/ws/stream` (сервер → браузер)
+
+Все сообщения — JSON с полем `type`.
+
+### `hello` — сразу после подключения
+```json
+{
+  "type": "hello",
+  "mode": "live | demo | replay",
+  "server_time": 1730455200.12,
+  "detector": "yolo11n-pose.pt (cpu)",
+  "recording": null,
+  "cameras": [ <camera>, ... ],
+  "board": { "squares_x": 5, "squares_y": 4, "square_m": 0.05, "marker_m": 0.037, "height_m": 0.0,
+             "size_m": [0.25, 0.2], "corners_world": [[x,y,z] x4] },
+  "room": { "size_m": [5, 4, 2.7] | null, "board_offset_m": [0, 0] }
+}
+```
+
+`<camera>`:
+```json
+{
+  "id": "redmi", "name": "redmi", "kind": "push | opencv | demo",
+  "online": true, "fps": 15.0, "size": [1280, 720],
+  "calibrated": true,
+  "intrinsics": "approx | approx+focal | board | demo",
+  "hfov_deg": 68.0,
+  "K": [[fx,0,cx],[0,fy,cy],[0,0,1]],
+  "R": [[...],[...],[...]], "t": [tx,ty,tz],      // X_cam = R·X_world + t (OpenCV: x вправо, y вниз, z вперёд)
+  "center": [x,y,z],                                // положение камеры в мире
+  "extrinsics_reproj_px": 0.4
+}
+```
+
+### `cameras` — изменился состав/калибровка камер
+`{ "type": "cameras", "cameras": [ <camera>, ... ] }`
+
+### `frame` — результат обработки (10–30 раз в секунду)
+```json
+{
+  "type": "frame",
+  "t": 1730455201.533,          // время кадра (часы сервера), с
+  "seq": 4521,
+  "persons": [
+    {
+      "id": 3,                  // стабильный ID трека
+      "pos": [1.42, 2.10, 0.95],  // центр таза (сглажен фильтром Калмана)
+      "floor": [1.42, 2.10, 0.0], // точка на полу под человеком — для траектории/тепловой карты
+      "vel": [0.31, -0.05, 0.0],  // м/с
+      "speed": 0.32,              // горизонтальная скорость, м/с
+      "mode": "tri | mono",       // tri — ≥2 камер (триангуляция), mono — 1 камера (допущение «ноги на полу»)
+      "cams": ["redmi", "laptop"],
+      "reproj_err_px": 2.7,       // качество триангуляции (null для mono)
+      "predicted": false,         // true — человека сейчас не видно, позиция — прогноз
+      "kp3d": [[x,y,z] | null, ... 17]  // скелет COCO-17 (только для tri), иначе null
+    }
+  ],
+  "detections": {               // 2D для панели с видео
+    "redmi": [ { "bbox": [x1,y1,x2,y2], "score": 0.91, "kp": [[x,y,conf] x17] } ]
+  },
+  "stats": { "fps": 12.5, "proc_ms": 80, "detect_ms": 70, "latency_ms": 140, "skew_ms": 25, "cams_used": ["redmi","laptop"] }
+}
+```
+
+Порядок точек COCO-17: `nose, l_eye, r_eye, l_ear, r_ear, l_shoulder, r_shoulder, l_elbow, r_elbow, l_wrist, r_wrist, l_hip, r_hip, l_knee, r_knee, l_ankle, r_ankle`.
+
+### `room_points` — «комната точками»
+```json
+{ "type": "room_points", "points": [[x,y,z], ...], "colors": [[r,g,b], ...], "pairs": [{"a":"redmi","b":"laptop","matches":120,"points":80}] }
+```
+
+## Запись сессии (`data/sessions/*.jsonl`)
+Одна строка — одно сообщение: первая строка `hello`, дальше `frame`. Тот же формат, что в WebSocket,
+поэтому `python run.py --replay файл.jsonl` проигрывает запись во вьювер, а фронтенд может читать файл напрямую.
+
+## REST
+| Метод | Путь | Что делает |
+|---|---|---|
+| GET | `/api/state` | то же, что `hello` + статистика |
+| POST | `/api/calib/extrinsics` | положение всех камер по доске (`{"cameras": [..]}` — опционально) |
+| POST | `/api/calib/{id}/intrinsics/start` | сбор кадров для калибровки оптики (`{"n": 15}`) |
+| GET | `/api/calib/{id}/intrinsics` | статус сбора |
+| POST | `/api/calib/{id}/hfov` | задать угол обзора вручную `{"hfov_deg": 68}` |
+| POST | `/api/calib/{id}/reset` | сбросить положение камеры |
+| POST | `/api/room/scan`, `/api/room/clear` | облако точек комнаты |
+| POST | `/api/record/start`, `/api/record/stop` | запись сессии |
+| POST | `/api/tracks/reset` | сбросить треки |
+| GET | `/api/cameras/{id}/mjpeg`, `/snapshot.jpg` | видео камеры с наложенными скелетами |
+| GET | `/api/board.png` | картинка доски |
+| GET | `/api/demo/truth` | (демо) истинные позиции людей — для проверки точности |
+
+## Приём кадров с телефона: WebSocket `/ws/push/{cam_id}`
+* текст `{"type":"hello","name":...,"width":...,"height":...}`;
+* текст `{"type":"ping","tc":<Date.now()>}` → ответ `{"type":"pong","tc":...,"ts":<время сервера, с>}` (синхронизация часов);
+* бинарное: `[8 байт float64 LE — время кадра в часах сервера][JPEG]`.
+
+Свой iOS-клиент (например, с глубиной лидара) может слать в этот же эндпоинт.
+
+## JSON комнаты (RoomPlan) — черновик, пока не реализовано
+```json
+{
+  "units": "m", "up": "z", "origin": "board_center",
+  "walls":   [ { "id": "w1", "dimensions": [w, h, d], "transform": [16 чисел, по строкам] } ],
+  "doors":   [ ... ], "windows": [ ... ],
+  "objects": [ { "id": "o1", "category": "table|chair|sofa|storage|bed|...", "dimensions": [w,h,d], "transform": [16] } ],
+  "alignment": { "room_points": [[x,y,z] x3], "world_points": [[x,y,z] x3] }
+}
+```

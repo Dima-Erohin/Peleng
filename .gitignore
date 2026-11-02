@@ -1,0 +1,21 @@
+# локальные данные: калибровки, сертификаты, записи сессий, сгенерированные доски
+data/
+backend/config.json
+
+# веса моделей (ultralytics скачивает сам)
+*.pt
+*.onnx
+*.mlpackage/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# IDE / ОС
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

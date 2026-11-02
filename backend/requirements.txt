@@ -1,0 +1,9 @@
+numpy>=1.24
+opencv-python>=4.8      # cv2.aruco (ChArUco) входит в основной пакет с 4.7
+scipy>=1.10
+fastapi>=0.110
+uvicorn[standard]>=0.27
+cryptography>=41        # самоподписанный HTTPS-сертификат для страницы-камеры
+pillow>=10              # scripts/make_board.py
+ultralytics>=8.3        # YOLO-pose (тянет torch; на Windows/Mac ставится CPU/MPS-версия)
+pytest>=8               # тесты

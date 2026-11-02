@@ -1,0 +1,427 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peleng</title>
+<style>
+  :root { color-scheme: dark; --bg: #0e1116; --panel: #161b22; --line: #2a313c; --text: #e6edf3; --muted: #8b949e; --acc: #2ea043; --warn: #d29922; --bad: #f85149; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; height: 100vh; display: grid; grid-template-columns: 1fr 360px; grid-template-rows: 1fr auto; }
+  #view { position: relative; grid-row: 1; grid-column: 1; min-height: 0; }
+  #view canvas { display: block; width: 100%; height: 100%; }
+  #hud { position: absolute; left: 10px; top: 8px; font: 12px ui-monospace, monospace; color: var(--muted); pointer-events: none; white-space: pre; }
+  #measure { position: absolute; right: 10px; top: 8px; font: 13px ui-monospace, monospace; background: rgba(0,0,0,.5); padding: 4px 8px; border-radius: 6px; display: none; }
+  aside { grid-row: 1 / span 2; grid-column: 2; background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 12px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 0 8px; }
+  h2:first-child { margin-top: 0; }
+  button { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: #21262d; color: var(--text); cursor: pointer; }
+  button:hover { border-color: #8b949e; }
+  button.primary { background: var(--acc); border-color: var(--acc); color: #fff; }
+  button.rec { background: var(--bad); border-color: var(--bad); color: #fff; }
+  .btns { display: flex; flex-wrap: wrap; gap: 6px; }
+  .cam { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
+  .cam .top { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); margin-right: 6px; }
+  .dot.on { background: var(--acc); }
+  .small { font-size: 12px; color: var(--muted); }
+  .ok { color: var(--acc); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  input[type=number] { width: 64px; font: inherit; background: #0d1117; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px; }
+  #log { font: 12px ui-monospace, monospace; white-space: pre-wrap; color: var(--muted); max-height: 220px; overflow-y: auto; background: #0d1117; border-radius: 6px; padding: 6px; }
+  #previews { grid-row: 2; grid-column: 1; display: flex; gap: 6px; padding: 6px; overflow-x: auto; background: #0b0d11; border-top: 1px solid var(--line); }
+  #previews figure { margin: 0; position: relative; flex: 0 0 auto; }
+  #previews img { height: 180px; display: block; border-radius: 6px; background: #000; }
+  #previews figcaption { position: absolute; left: 6px; top: 4px; font-size: 12px; background: rgba(0,0,0,.6); padding: 1px 6px; border-radius: 4px; }
+  label.chk { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
+  @media (max-width: 800px) { body { grid-template-columns: 1fr; grid-template-rows: 55vh auto auto; } aside { grid-row: 3; grid-column: 1; border-left: 0; } #previews img { height: 120px; } }
+</style>
+<script type="importmap">
+{ "imports": { "three": "/static/vendor/three.module.min.js" } }
+</script>
+</head>
+<body>
+<div id="view"><div id="hud">подключение…</div><div id="measure"></div></div>
+<div id="previews"></div>
+<aside>
+  <h2>Калибровка</h2>
+  <div class="btns">
+    <button class="primary" id="btnExtr" title="Доска должна лежать на полу и быть видна всем камерам">Калибровать положение по доске</button>
+    <a href="/api/board.png" target="_blank"><button>Доска (PNG)</button></a>
+  </div>
+  <label class="chk"><input type="checkbox" id="chkBoard"> показывать найденную доску на превью</label>
+  <h2>Камеры</h2>
+  <div id="cams"></div>
+  <div class="small">Телефон: открой на нём <b id="camUrl"></b></div>
+  <h2>Сцена</h2>
+  <div class="btns">
+    <button id="btnScan" title="Облако точек по особым точкам кадров (нужно ≥ 2 откалиброванных камер)">Комната точками</button>
+    <button id="btnClearPts">Убрать точки</button>
+    <button id="btnTrails">Сбросить траектории</button>
+    <button id="btnMark" title="Клавиша M: запомнить текущее положение человека и показывать расстояние от него">Отметка (M)</button>
+  </div>
+  <label class="chk"><input type="checkbox" id="chkTex" checked> кадры камер в 3D</label>
+  <label class="chk"><input type="checkbox" id="chkSkel" checked> скелеты</label>
+  <h2>Запись</h2>
+  <div class="btns"><button id="btnRec">● Записать сессию</button></div>
+  <h2>Журнал</h2>
+  <div id="log"></div>
+</aside>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "/static/vendor/OrbitControls.js";
+
+const $ = (id) => document.getElementById(id);
+const log = (s) => { const el = $("log"); el.textContent = `[${new Date().toLocaleTimeString()}] ${s}\n` + el.textContent; };
+$("camUrl").textContent = `${location.origin}/cam`;
+
+// ---------------------------------------------------------------- сцена (Z вверх)
+THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
+const view = $("view");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+view.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x0e1116);
+const camera = new THREE.PerspectiveCamera(55, 1, 0.05, 200);
+camera.position.set(-4, -5, 4);
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0.8);
+controls.update();
+scene.add(new THREE.AmbientLight(0xffffff, 0.7));
+const sun = new THREE.DirectionalLight(0xffffff, 0.8); sun.position.set(3, -2, 6); scene.add(sun);
+
+const grid = new THREE.GridHelper(20, 40, 0x30363d, 0x1c2128);
+grid.rotation.x = Math.PI / 2;
+scene.add(grid);
+scene.add(new THREE.AxesHelper(0.5));
+
+function resize() {
+  const w = view.clientWidth, h = view.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / Math.max(h, 1); camera.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(view);
+
+const COLORS = [0xff6b6b, 0x4dabf7, 0x51cf66, 0xfcc419, 0xcc5de8, 0x22b8cf, 0xff922b, 0xf06595];
+const colorFor = (id) => COLORS[(id - 1) % COLORS.length];
+const BONES = [[5,6],[5,7],[7,9],[6,8],[8,10],[5,11],[6,12],[11,12],[11,13],[13,15],[12,14],[14,16],[0,5],[0,6]];
+
+function textSprite(text, color = "#fff") {
+  const c = document.createElement("canvas"); c.width = 256; c.height = 64;
+  const g = c.getContext("2d");
+  g.font = "bold 30px system-ui"; g.fillStyle = "rgba(0,0,0,.55)"; g.fillRect(0, 0, 256, 64);
+  g.fillStyle = color; g.textBaseline = "middle"; g.fillText(text, 10, 32);
+  const tex = new THREE.CanvasTexture(c);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false }));
+  s.scale.set(0.6, 0.15, 1);
+  s.userData.canvas = c;
+  return s;
+}
+function setSpriteText(s, text, color = "#fff") {
+  const c = s.userData.canvas, g = c.getContext("2d");
+  g.clearRect(0, 0, 256, 64); g.fillStyle = "rgba(0,0,0,.55)"; g.fillRect(0, 0, 256, 64);
+  g.font = "bold 30px system-ui"; g.fillStyle = color; g.textBaseline = "middle"; g.fillText(text, 10, 32);
+  s.material.map.needsUpdate = true;
+}
+
+// ---------------------------------------------------------------- статичные объекты: доска, комната, камеры
+const staticGroup = new THREE.Group(); scene.add(staticGroup);
+let boardMesh = null, roomBox = null;
+function drawBoard(b) {
+  if (boardMesh) staticGroup.remove(boardMesh);
+  const pts = b.corners_world.map(p => new THREE.Vector3(...p));
+  const g = new THREE.BufferGeometry().setFromPoints([...pts, pts[0]]);
+  boardMesh = new THREE.Line(g, new THREE.LineBasicMaterial({ color: 0xff00ff }));
+  staticGroup.add(boardMesh);
+}
+function drawRoom(room) {
+  if (roomBox) staticGroup.remove(roomBox);
+  roomBox = null;
+  if (!room || !room.size_m) return;
+  const [w, d, h] = room.size_m, off = room.board_offset_m || [0, 0];
+  const geo = new THREE.EdgesGeometry(new THREE.BoxGeometry(w, d, h));
+  roomBox = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x58a6ff, transparent: true, opacity: 0.5 }));
+  roomBox.position.set(-off[0], -off[1], h / 2);
+  staticGroup.add(roomBox);
+}
+
+const camGroup = new THREE.Group(); scene.add(camGroup);
+const camObjs = {};   // id -> {group, plane, tex}
+let cameras = [];
+function drawCameras(list) {
+  cameras = list;
+  for (const id of Object.keys(camObjs)) { camGroup.remove(camObjs[id].group); delete camObjs[id]; }
+  for (const c of list) {
+    if (!c.calibrated) continue;
+    const R = c.R, t = c.t, K = c.K, [W, H] = c.size;
+    const C = new THREE.Vector3(...c.center);
+    // точка изображения (u,v) на глубине d -> мир: X = R^T (d*K^-1 [u v 1] - t)
+    const toWorld = (u, v, d) => {
+      const x = (u - K[0][2]) / K[0][0] * d, y = (v - K[1][2]) / K[1][1] * d, z = d;
+      const p = [x - t[0], y - t[1], z - t[2]];
+      return new THREE.Vector3(R[0][0]*p[0] + R[1][0]*p[1] + R[2][0]*p[2], R[0][1]*p[0] + R[1][1]*p[1] + R[2][1]*p[2], R[0][2]*p[0] + R[1][2]*p[1] + R[2][2]*p[2]);
+    };
+    const d = 0.35;
+    const corners = [toWorld(0, 0, d), toWorld(W, 0, d), toWorld(W, H, d), toWorld(0, H, d)];
+    const group = new THREE.Group();
+    const segs = [];
+    for (const p of corners) segs.push(C, p);
+    for (let i = 0; i < 4; i++) segs.push(corners[i], corners[(i + 1) % 4]);
+    group.add(new THREE.LineSegments(new THREE.BufferGeometry().setFromPoints(segs), new THREE.LineBasicMaterial({ color: 0xffd33d })));
+    // плоскость изображения с текстурой кадра
+    const geo = new THREE.BufferGeometry();
+    const pos = new Float32Array([...corners[0].toArray(), ...corners[1].toArray(), ...corners[2].toArray(), ...corners[3].toArray()]);
+    geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+    geo.setAttribute("uv", new THREE.BufferAttribute(new Float32Array([0, 1, 1, 1, 1, 0, 0, 0]), 2));
+    geo.setIndex([0, 1, 2, 0, 2, 3]);
+    const mat = new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide, transparent: true, opacity: 0.9 });
+    const plane = new THREE.Mesh(geo, mat);
+    group.add(plane);
+    const label = textSprite(c.name || c.id, "#ffd33d");
+    label.position.copy(C).add(new THREE.Vector3(0, 0, 0.15));
+    group.add(label);
+    camGroup.add(group);
+    camObjs[c.id] = { group, plane };
+  }
+}
+const texLoader = new THREE.TextureLoader();
+setInterval(() => {
+  if (!$("chkTex").checked) return;
+  for (const [id, o] of Object.entries(camObjs)) {
+    texLoader.load(`/api/cameras/${encodeURIComponent(id)}/snapshot.jpg?overlay=0&width=320&_=${Date.now()}`, (tex) => {
+      tex.colorSpace = THREE.SRGBColorSpace;
+      const old = o.plane.material.map;
+      o.plane.material.map = tex; o.plane.material.color.set(0xffffff); o.plane.material.needsUpdate = true;
+      if (old) old.dispose();
+    }, undefined, () => {});
+  }
+}, 1500);
+
+// ---------------------------------------------------------------- облако точек комнаты
+let roomPoints = null;
+function drawRoomPoints(m) {
+  if (roomPoints) { scene.remove(roomPoints); roomPoints.geometry.dispose(); roomPoints = null; }
+  if (!m.points || !m.points.length) return;
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(m.points.flat(), 3));
+  g.setAttribute("color", new THREE.Float32BufferAttribute(m.colors.flat().map(v => v / 255), 3));
+  roomPoints = new THREE.Points(g, new THREE.PointsMaterial({ size: 0.03, vertexColors: true }));
+  scene.add(roomPoints);
+}
+
+// ---------------------------------------------------------------- люди и траектории
+const people = {};   // id -> {group, joints[], bones, body, ring, label, trail, trailPts[]}
+const TRAIL_MAX = 900;
+function makePerson(id) {
+  const color = colorFor(id);
+  const group = new THREE.Group();
+  const mat = new THREE.MeshStandardMaterial({ color, transparent: true });
+  const joints = [];
+  for (let i = 0; i < 17; i++) { const s = new THREE.Mesh(new THREE.SphereGeometry(0.03, 8, 6), mat); group.add(s); joints.push(s); }
+  const bones = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color, transparent: true }));
+  bones.geometry.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(BONES.length * 6), 3));
+  group.add(bones);
+  const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.18, 1.1, 4, 12), new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.45 }));
+  body.rotation.x = Math.PI / 2;
+  group.add(body);
+  const ring = new THREE.Mesh(new THREE.RingGeometry(0.22, 0.28, 32), new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide, transparent: true }));
+  group.add(ring);
+  const label = textSprite(`ID ${id}`); group.add(label);
+  const trailGeo = new THREE.BufferGeometry();
+  trailGeo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(TRAIL_MAX * 3), 3));
+  trailGeo.setDrawRange(0, 0);
+  const trail = new THREE.Line(trailGeo, new THREE.LineBasicMaterial({ color }));
+  scene.add(group); scene.add(trail);
+  return people[id] = { group, joints, bones, body, ring, label, trail, trailPts: [], last: 0, mat };
+}
+function updatePeople(list) {
+  const now = performance.now();
+  for (const p of list) {
+    const o = people[p.id] || makePerson(p.id);
+    o.last = now;
+    o.group.visible = true;
+    const opacity = p.predicted ? 0.35 : 1;
+    const hasSkel = $("chkSkel").checked && p.kp3d && p.kp3d.filter(Boolean).length >= 4;
+    o.joints.forEach((s, i) => { const k = hasSkel && p.kp3d[i]; s.visible = !!k; if (k) s.position.set(...k); });
+    o.mat.opacity = opacity;
+    o.bones.visible = !!hasSkel;
+    if (hasSkel) {
+      const arr = o.bones.geometry.attributes.position.array;
+      BONES.forEach(([a, b], i) => {
+        const A = p.kp3d[a], B = p.kp3d[b];
+        const ok = A && B;
+        arr.set(ok ? A : [0, 0, -100], i * 6); arr.set(ok ? B : [0, 0, -100], i * 6 + 3);
+      });
+      o.bones.geometry.attributes.position.needsUpdate = true;
+      o.bones.geometry.computeBoundingSphere();
+    }
+    o.body.visible = !hasSkel;
+    o.body.position.set(p.floor[0], p.floor[1], 0.8);
+    o.body.material.opacity = 0.45 * opacity;
+    o.ring.position.set(p.floor[0], p.floor[1], 0.005);
+    o.label.position.set(p.floor[0], p.floor[1], 2.0);
+    setSpriteText(o.label, `ID ${p.id} · ${p.speed.toFixed(2)} м/с${p.mode === "mono" ? " · 1 кам" : ""}${p.predicted ? " · прогноз" : ""}`);
+    // траектория по полу
+    const last = o.trailPts[o.trailPts.length - 1];
+    if (!last || Math.hypot(last[0] - p.floor[0], last[1] - p.floor[1]) > 0.02) {
+      o.trailPts.push([p.floor[0], p.floor[1], 0.01]);
+      if (o.trailPts.length > TRAIL_MAX) o.trailPts.shift();
+      const arr = o.trail.geometry.attributes.position.array;
+      o.trailPts.forEach((q, i) => arr.set(q, i * 3));
+      o.trail.geometry.attributes.position.needsUpdate = true;
+      o.trail.geometry.setDrawRange(0, o.trailPts.length);
+      o.trail.geometry.computeBoundingSphere();
+    }
+  }
+  for (const o of Object.values(people)) if (now - o.last > 500) o.group.visible = false;
+}
+$("btnTrails").onclick = () => {
+  for (const o of Object.values(people)) { o.trailPts = []; o.trail.geometry.setDrawRange(0, 0); }
+  fetch("/api/tracks/reset", { method: "POST" });
+};
+
+// ---------------------------------------------------------------- отметка и замер расстояния
+let mark = null, lastPersons = [];
+const markMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.05, 0.02, 16), new THREE.MeshBasicMaterial({ color: 0xffffff }));
+markMesh.rotation.x = Math.PI / 2; markMesh.visible = false; scene.add(markMesh);
+function setMark() {
+  const p = lastPersons.find(q => !q.predicted) || lastPersons[0];
+  if (!p) { log("нет человека для отметки"); return; }
+  mark = { id: p.id, pos: p.floor.slice() };
+  markMesh.position.set(mark.pos[0], mark.pos[1], 0.01); markMesh.visible = true;
+  $("measure").style.display = "block";
+  log(`отметка: ID ${p.id} в (${p.floor.map(v => v.toFixed(2)).join(", ")})`);
+}
+$("btnMark").onclick = setMark;
+addEventListener("keydown", (e) => { if (e.key === "m" || e.key === "M" || e.key === "ь" || e.key === "Ь") setMark(); });
+
+// ---------------------------------------------------------------- панель камер и превью
+function renderCams() {
+  const box = $("cams"); box.innerHTML = "";
+  const prev = $("previews");
+  const existing = new Set([...prev.children].map(f => f.dataset.id));
+  for (const c of cameras) {
+    const div = document.createElement("div"); div.className = "cam";
+    const calib = c.calibrated
+      ? `<span class="ok">положение ✓</span> ${c.extrinsics_reproj_px != null ? `(${c.extrinsics_reproj_px} px)` : ""}`
+      : `<span class="warn">положение не задано</span>`;
+    const intr = c.intrinsics === "board" ? `<span class="ok">оптика ✓</span>` : c.intrinsics === "approx+focal" ? `<span class="warn">оптика ≈ (фокус уточнён)</span>` : `<span class="warn">оптика ≈</span>`;
+    div.innerHTML = `
+      <div class="top"><b><span class="dot ${c.online ? "on" : ""}"></span>${c.name || c.id}</b><span class="small">${c.kind} · ${c.fps} к/с ${c.size ? "· " + c.size.join("×") : ""}</span></div>
+      <div class="small">${calib} · ${intr} ${c.hfov_deg ? "· обзор " + c.hfov_deg + "°" : ""} ${c.center ? "<br>в мире: (" + c.center.map(v => v.toFixed(2)).join(", ") + ")" : ""}</div>
+      <div class="btns" style="margin-top:6px">
+        <button data-act="intr">Оптика: 15 кадров</button>
+        <button data-act="reset">Сброс</button>
+        <label class="small">обзор° <input type="number" step="1" min="30" max="120" value="${c.hfov_deg || 68}" data-act="hfov"></label>
+      </div>
+      <div class="small" data-role="job"></div>`;
+    div.querySelector('[data-act="intr"]').onclick = () => startIntrinsics(c.id, div.querySelector('[data-role="job"]'));
+    div.querySelector('[data-act="reset"]').onclick = async () => { await post(`/api/calib/${c.id}/reset`, { keep_intrinsics: true }); log(`${c.id}: положение сброшено`); };
+    div.querySelector('[data-act="hfov"]').onchange = async (e) => { await post(`/api/calib/${c.id}/hfov`, { hfov_deg: Number(e.target.value) }); log(`${c.id}: угол обзора ${e.target.value}°`); };
+    box.appendChild(div);
+    if (!existing.has(c.id)) {
+      const f = document.createElement("figure"); f.dataset.id = c.id;
+      f.innerHTML = `<img alt=""><figcaption>${c.name || c.id}</figcaption>`;
+      prev.appendChild(f);
+    }
+    existing.delete(c.id);
+  }
+  for (const id of existing) prev.querySelector(`[data-id="${CSS.escape(id)}"]`)?.remove();
+  refreshPreviews();
+}
+function refreshPreviews() {
+  const b = $("chkBoard").checked ? 1 : 0;
+  for (const f of $("previews").children) {
+    const img = f.querySelector("img");
+    const url = `/api/cameras/${encodeURIComponent(f.dataset.id)}/mjpeg?board_overlay=${b}&width=480`;
+    if (img.dataset.url !== url) { img.dataset.url = url; img.src = url; }
+  }
+}
+$("chkBoard").onchange = refreshPreviews;
+
+async function post(url, body) {
+  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  return r.json();
+}
+async function startIntrinsics(id, el) {
+  await post(`/api/calib/${id}/intrinsics/start`, { n: 15 });
+  log(`${id}: калибровка оптики — медленно показывайте доску камере под разными углами, близко, по всему кадру`);
+  const poll = setInterval(async () => {
+    const j = await (await fetch(`/api/calib/${id}/intrinsics`)).json();
+    el.textContent = j.state === "collecting" ? `сбор кадров: ${j.n}/${j.need}` : j.state === "done" ? `готово: ошибка ${j.rms} px, обзор ${j.hfov_deg}°` : `${j.state} ${j.message || ""}`;
+    if (j.state !== "collecting") { clearInterval(poll); log(`${id}: оптика — ${el.textContent}`); }
+  }, 500);
+}
+
+$("btnExtr").onclick = async () => {
+  log("калибровка положения… (доска на полу, ~1 с)");
+  const r = await post("/api/calib/extrinsics");
+  for (const [id, x] of Object.entries(r.cameras || {})) {
+    log(x.ok ? `${id}: ✓ ошибка ${x.reproj_px} px, до доски ${x.dist_to_origin_m} м, обзор ${x.hfov_deg}°${x.focal_refined ? " (фокус уточнён)" : ""}` : `${id}: ✗ ${x.message}`);
+  }
+  if (r.message) log(r.message);
+};
+$("btnScan").onclick = async () => {
+  log("сканирую комнату…");
+  const r = await post("/api/room/scan");
+  log(`точек: ${r.points}. ${r.message}. ` + (r.pairs || []).map(p => `${p.a}–${p.b}: ${p.points}`).join(", "));
+};
+$("btnClearPts").onclick = () => post("/api/room/clear");
+let recording = false;
+$("btnRec").onclick = async () => {
+  const r = await post(recording ? "/api/record/stop" : "/api/record/start");
+  recording = !recording;
+  $("btnRec").textContent = recording ? "■ Остановить запись" : "● Записать сессию";
+  $("btnRec").classList.toggle("rec", recording);
+  log((recording ? "запись: " : "сохранено: ") + r.file);
+};
+
+// ---------------------------------------------------------------- WebSocket
+let hudInfo = { mode: "", detector: "" }, frames = 0, fpsView = 0;
+setInterval(() => { fpsView = frames; frames = 0; }, 1000);
+function connect() {
+  const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/stream`);
+  ws.onmessage = (ev) => {
+    const m = JSON.parse(ev.data);
+    if (m.type === "hello") {
+      hudInfo = { mode: m.mode, detector: m.detector };
+      drawBoard(m.board); drawRoom(m.room); drawCameras(m.cameras); renderCams();
+      if (m.recording) { recording = true; $("btnRec").textContent = "■ Остановить запись"; $("btnRec").classList.add("rec"); }
+      log(`подключено: режим ${m.mode}, детектор ${m.detector}`);
+    } else if (m.type === "cameras") {
+      drawCameras(m.cameras); renderCams();
+    } else if (m.type === "room_points") {
+      drawRoomPoints(m);
+    } else if (m.type === "frame") {
+      frames++;
+      lastPersons = m.persons;
+      updatePeople(m.persons);
+      const s = m.stats || {};
+      $("hud").textContent =
+        `режим: ${hudInfo.mode}  детектор: ${hudInfo.detector}\n` +
+        `обработка: ${s.fps ?? "–"} к/с  задержка: ${s.latency_ms} мс  рассинхрон: ${s.skew_ms} мс  YOLO: ${s.detect_ms} мс\n` +
+        `камеры в 3D: ${(s.cams_used || []).join(", ") || "нет (нужна калибровка)"}\n` +
+        m.persons.map(p => `ID ${p.id}: (${p.pos.map(v => v.toFixed(2)).join(", ")}) ${p.mode}${p.reproj_err_px != null ? " ±" + p.reproj_err_px + "px" : ""} [${p.cams.join(",")}]`).join("\n");
+      if (mark) {
+        const p = m.persons.find(q => q.id === mark.id) || m.persons[0];
+        if (p) $("measure").textContent = `от отметки: ${Math.hypot(p.floor[0] - mark.pos[0], p.floor[1] - mark.pos[1]).toFixed(2)} м (ID ${p.id})`;
+      }
+    }
+  };
+  ws.onclose = () => { $("hud").textContent = "нет связи с сервером, переподключение…"; setTimeout(connect, 1000); };
+}
+connect();
+setInterval(async () => {  // обновлять fps/онлайн камер
+  try { const s = await (await fetch("/api/state")).json(); cameras = s.cameras; renderCamsLight(s.cameras); } catch (e) {}
+}, 2000);
+function renderCamsLight(list) {
+  // перерисовываем список, только если поменялся состав камер или их статус
+  const sig = list.map(c => `${c.id}:${c.online}:${c.calibrated}:${c.intrinsics}:${c.fps}`).join("|");
+  if (sig !== renderCamsLight.sig) { renderCamsLight.sig = sig; if (!document.activeElement || document.activeElement.tagName !== "INPUT") renderCams(); }
+}
+
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+</script>
+</body>
+</html>
