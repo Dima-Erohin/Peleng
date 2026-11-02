@@ -71,6 +71,10 @@ Three.js по умолчанию Y-up: либо ставить `THREE.Object3D.D
 }
 ```
 
+**`pos_std_m`** (расширение «Точность», [accuracy.md](accuracy.md)): у элементов `persons` (и `objects`, если есть) с `mode: "tri"` —
+`[σx, σy, σz]`, м, оценка ошибки положения (1σ) из геометрии камер, видевших точку, при шуме 2 px (`accuracy.sigma_px`).
+Не учитывает ошибки калибровки; у `mono` поля нет.
+
 Порядок точек COCO-17: `nose, l_eye, r_eye, l_ear, r_ear, l_shoulder, r_shoulder, l_elbow, r_elbow, l_wrist, r_wrist, l_hip, r_hip, l_knee, r_knee, l_ankle, r_ankle`.
 
 ### Поле `objects` в `frame` — отслеживаемые предметы (расширение «Объекты», [objects.md](objects.md))
@@ -116,6 +120,7 @@ REST: `GET/POST /api/objects/` (режим, классы), `POST /api/objects/re
 | GET | `/api/cameras/{id}/mjpeg`, `/snapshot.jpg` | видео камеры с наложенными скелетами |
 | GET | `/api/board.png` | картинка доски |
 | GET | `/api/demo/truth` | (демо) истинные позиции людей — для проверки точности |
+| * | `/api/accuracy/...` | проверки точности (доска, рулетка), отчёт — см. [accuracy.md](accuracy.md) |
 
 ## Приём кадров с телефона: WebSocket `/ws/push/{cam_id}`
 * текст `{"type":"hello","name":...,"width":...,"height":...}`;
