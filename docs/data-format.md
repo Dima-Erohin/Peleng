@@ -73,6 +73,19 @@ Three.js по умолчанию Y-up: либо ставить `THREE.Object3D.D
 
 Порядок точек COCO-17: `nose, l_eye, r_eye, l_ear, r_ear, l_shoulder, r_shoulder, l_elbow, r_elbow, l_wrist, r_wrist, l_hip, r_hip, l_knee, r_knee, l_ankle, r_ankle`.
 
+### Поле `objects` в `frame` — отслеживаемые предметы (расширение «Объекты», [objects.md](objects.md))
+```jsonc
+"objects": [
+  { "id": 101, "kind": "object", "cls": "sports ball",   // класс COCO или "tag:7" для метки ArUco (DICT_5X5_100)
+    "pos": [x,y,z], "floor": [x,y,0], "vel": [vx,vy,vz], "speed": 0.4, "mode": "tri | mono",
+    "cams": ["redmi","iphone15"], "reproj_err_px": 1.2, "predicted": false }
+],
+"object_detections": { "redmi": [ { "cls": "sports ball", "bbox": [x1,y1,x2,y2], "score": 0.8 } ] }  // 2D, только если режим включён
+```
+Поля как у `persons` (без `kp3d`); `pos` — центр объекта. ID общие с людьми и не пересекаются.
+Режим выключен (`off`, по умолчанию) — `"objects": []`. В `stats` добавляется `objects_ms`.
+REST: `GET/POST /api/objects/` (режим, классы), `POST /api/objects/reset`.
+
 ### `room_points` — «комната точками»
 ```json
 { "type": "room_points", "points": [[x,y,z], ...], "colors": [[r,g,b], ...], "pairs": [{"a":"redmi","b":"laptop","matches":120,"points":80}] }
