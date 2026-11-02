@@ -62,10 +62,12 @@ Three.js по умолчанию Y-up: либо ставить `THREE.Object3D.D
       "kp3d": [[x,y,z] | null, ... 17]  // скелет COCO-17 (только для tri), иначе null
     }
   ],
-  "detections": {               // 2D для панели с видео
+  "detections": {               // 2D для панели с видео, в пикселях кадра размера frame_size
     "redmi": [ { "bbox": [x1,y1,x2,y2], "score": 0.91, "kp": [[x,y,conf] x17] } ]
   },
+  "frame_size": { "redmi": [640, 360], "laptop": [1280, 720] },  // телефоны при трекинге шлют уменьшенные кадры (pipeline.track_width)
   "stats": { "fps": 12.5, "proc_ms": 80, "detect_ms": 70, "latency_ms": 140, "skew_ms": 25, "cams_used": ["redmi","laptop"] }
+  // skew_ms — разброс времени съёмки между камерами пачки (с кадрами по команде обычно единицы–десятки мс)
 }
 ```
 

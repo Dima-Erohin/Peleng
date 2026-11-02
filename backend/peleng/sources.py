@@ -2,6 +2,7 @@
 
 * OpenCVSource — вебкамера ноутбука (индекс 0/1/…) или URL потока (IP Webcam, DroidCam: http://IP:PORT/video).
 * PushSource — телефон открыл страницу /cam в браузере и шлёт JPEG по WebSocket (ничего не надо ставить).
+  Кадры снимаются по команде сервера («capture»), см. Pipeline.request_frames и web/cam.html.
 
 Время кадра — в часах сервера (time.time()). Телефон сам пересчитывает своё время в серверное
 по пингам (см. web/cam.html), так что задержка сети не влияет на синхронизацию.
@@ -12,7 +13,7 @@ import json
 import platform
 import threading
 import time
-from dataclasses import dataclass
+from collections import deque
 from pathlib import Path
 
 import cv2
@@ -21,11 +22,28 @@ import numpy as np
 from .geometry import CameraModel, approx_K
 
 
-@dataclass
 class Frame:
-    image: np.ndarray
-    ts: float
-    seq: int
+    """Кадр. От телефона приходит JPEG — он распаковывается только при первом обращении к .image
+    (большую часть кадров никто не читает, а распаковка в цикле событий тормозит пинги и синхронизацию)."""
+
+    __slots__ = ("_image", "_jpeg", "_lock", "ts", "seq", "t_recv")
+
+    def __init__(self, image: np.ndarray | None, ts: float, seq: int, jpeg: np.ndarray | None = None):
+        self._image = image
+        self._jpeg = jpeg
+        self._lock = threading.Lock()
+        self.ts = ts
+        self.seq = seq
+        self.t_recv = time.time()  # когда кадр пришёл на сервер
+
+    @property
+    def image(self) -> np.ndarray | None:
+        if self._image is None and self._jpeg is not None:
+            with self._lock:
+                if self._image is None and self._jpeg is not None:
+                    self._image = cv2.imdecode(self._jpeg, cv2.IMREAD_COLOR)
+                    self._jpeg = None
+        return self._image
 
 
 class Source:
@@ -38,12 +56,14 @@ class Source:
         self._seq = 0
         self._lock = threading.Lock()
         self._fps_t: list[float] = []
+        self._hist: deque[Frame] = deque(maxlen=30)
         self.info: dict = {}
 
-    def _put(self, image: np.ndarray, ts: float) -> None:
+    def _put(self, image: np.ndarray | None, ts: float, jpeg: np.ndarray | None = None) -> None:
         with self._lock:
             self._seq += 1
-            self._frame = Frame(image, ts, self._seq)
+            self._frame = Frame(image, ts, self._seq, jpeg)
+            self._hist.append(self._frame)
             now = time.time()
             self._fps_t.append(now)
             self._fps_t = [x for x in self._fps_t if now - x < 2.0]
@@ -62,6 +82,20 @@ class Source:
     def online(self) -> bool:
         f = self._frame
         return f is not None and time.time() - f.ts < 2.0
+
+    def nearest(self, ts: float) -> Frame | None:
+        """Кадр из недавней истории, ближайший по времени к ts (для камер-потоков рядом с кадрами по команде)."""
+        with self._lock:
+            hist = list(self._hist)
+        return min(hist, key=lambda f: abs(f.ts - ts)) if hist else None
+
+    on_demand = False
+
+    def request(self, width: int) -> bool:
+        return False
+
+    def is_full_res(self, frame: Frame) -> bool:
+        return True
 
     def start(self) -> None:  # noqa: B027
         pass
@@ -122,8 +156,34 @@ class OpenCVSource(Source):
 class PushSource(Source):
     kind = "push"
 
+    def __init__(self, cam_id: str, name: str | None = None):
+        super().__init__(cam_id, name)
+        # пока телефон подключён, сервер кладёт сюда функцию отправки сообщения ему (из любого потока)
+        self.sender = None
+
     def push(self, image: np.ndarray, ts: float) -> None:
         self._put(image, ts)
+
+    def push_jpeg(self, jpeg: np.ndarray, ts: float) -> None:
+        self._put(None, ts, jpeg)
+
+    @property
+    def on_demand(self) -> bool:
+        """Телефон снимает кадр по команде сервера, а не шлёт поток сам."""
+        return self.sender is not None and bool(self.info.get("on_demand"))
+
+    def request(self, width: int) -> bool:
+        """Попросить телефон снять кадр. width — ширина кадра (0 — полное разрешение камеры)."""
+        if not self.on_demand:
+            return False
+        self.sender({"type": "capture", "w": int(width)})
+        return True
+
+    def is_full_res(self, frame: Frame) -> bool:
+        """Кадр в полном разрешении камеры (для калибровки нужны именно такие)."""
+        full = max(self.info.get("vw") or 0, self.info.get("vh") or 0)
+        img = frame.image
+        return img is not None and max(img.shape[:2]) >= 0.95 * full
 
 
 class CameraRegistry:

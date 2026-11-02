@@ -1,9 +1,7 @@
 {
   "server": { "host": "0.0.0.0", "port": 8443, "https": true },
 
-  "cameras": [
-    { "id": "laptop", "name": "Вебкамера HP", "source": 0, "width": 1280, "height": 720, "hfov_deg": 65 }
-  ],
+  "cameras": [],
 
   "board": {
     "squares_x": 5, "squares_y": 4,
@@ -13,6 +11,8 @@
   },
 
   "pose": { "model": "yolo11n-pose.pt", "imgsz": 640, "conf": 0.4, "device": null },
+
+  "pipeline": { "max_fps": 15, "track_width": 640 },
 
   "room": { "size_m": null, "board_offset_m": [0.0, 0.0] }
 }

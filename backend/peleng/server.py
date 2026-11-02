@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import struct
 import threading
@@ -23,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .calibration import Board, calibrate_intrinsics, solve_extrinsics
 from .config import BACKEND_DIR, DATA_DIR
+from .ext import ExtContext, load_extensions
 from .geometry import CameraModel
 from .pipeline import Pipeline
 from .pose import SKELETON
@@ -30,6 +32,7 @@ from .room import scan_points
 from .sources import CameraRegistry, OpenCVSource, PushSource
 
 WEB_DIR = BACKEND_DIR / "web"
+FULL_RES_SWITCH_S = 0.5  # сколько ждать, пока телефоны переключатся на полное разрешение
 
 
 class Hub:
@@ -194,6 +197,20 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
             registry.add(src)
         print(f"[{cam_id}] телефон подключился")
         hub.publish({"type": "cameras", "cameras": registry.describe()})
+        loop = asyncio.get_running_loop()
+        send_lock = asyncio.Lock()
+
+        async def send(m: dict) -> None:
+            try:
+                async with send_lock:
+                    await ws.send_text(json.dumps(m))
+            except (WebSocketDisconnect, RuntimeError):
+                pass
+
+        def sender(m: dict) -> None:  # вызывается из потока конвейера
+            asyncio.run_coroutine_threadsafe(send(m), loop)
+
+        src.sender = sender
         try:
             while True:
                 msg = await ws.receive()
@@ -201,19 +218,18 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
                     break
                 if msg.get("bytes") is not None:
                     data = msg["bytes"]
-                    if len(data) < 9:
+                    if len(data) < 9 or data[8:10] != b"\xff\xd8":
                         continue
                     (ts,) = struct.unpack("<d", data[:8])
-                    img = cv2.imdecode(np.frombuffer(data[8:], np.uint8), cv2.IMREAD_COLOR)
-                    if img is not None:
-                        # защита от грубо неверного времени (часы не синхронизированы)
-                        if abs(ts - time.time()) > 2.0:
-                            ts = time.time()
-                        src.push(img, ts)
+                    # защита от грубо неверного времени (часы не синхронизированы)
+                    if abs(ts - time.time()) > 2.0:
+                        ts = time.time()
+                    # JPEG не распаковываем здесь: это блокировало бы цикл событий (пинги, другие телефоны)
+                    src.push_jpeg(np.frombuffer(data, np.uint8, offset=8), ts)
                 elif msg.get("text"):
                     m = json.loads(msg["text"])
                     if m.get("type") == "ping":
-                        await ws.send_text(json.dumps({"type": "pong", "tc": m.get("tc"), "ts": time.time()}))
+                        await send({"type": "pong", "tc": m.get("tc"), "ts": time.time()})
                     elif m.get("type") == "hello":
                         src.name = m.get("name") or cam_id
                         src.info = {k: v for k, v in m.items() if k not in ("type", "name")}
@@ -222,6 +238,8 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
         except WebSocketDisconnect:
             pass
         finally:
+            if src.sender is sender:
+                src.sender = None
             print(f"[{cam_id}] телефон отключился")
             hub.publish({"type": "cameras", "cameras": registry.describe()})
 
@@ -240,12 +258,15 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
         img = img.copy()
         ts_dets = pipeline.last_dets.get(cam_id)
         if ts_dets:
-            for p in ts_dets[1]:
-                x1, y1, x2, y2 = p.bbox.astype(int)
+            _, persons, det_w = ts_dets
+            s = img.shape[1] / det_w  # детекции в пикселях кадра, на котором их нашли
+            for p in persons:
+                x1, y1, x2, y2 = (p.bbox * s).astype(int)
                 cv2.rectangle(img, (x1, y1), (x2, y2), (0, 200, 255), 2)
+                kp = (p.kp * s).astype(int)
                 for i, j in SKELETON:
                     if p.kc[i] > 0.35 and p.kc[j] > 0.35:
-                        cv2.line(img, tuple(p.kp[i].astype(int)), tuple(p.kp[j].astype(int)), (0, 255, 0), 2)
+                        cv2.line(img, tuple(kp[i]), tuple(kp[j]), (0, 255, 0), 2)
         if show_board:
             det = board.detect(img)
             if det is not None:
@@ -254,6 +275,7 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
                 cv2.putText(img, f"board: {len(det.ids)} corners", (10, img.shape[0] - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
         m = registry.model(cam_id)
         if m is not None and m.calibrated:
+            m = m.resized((img.shape[1], img.shape[0]))  # превью меньше кадра
             # оси мира в начале координат
             pts = np.array([[0, 0, 0], [0.3, 0, 0], [0, 0.3, 0], [0, 0, 0.3]], float)
             if (m.depth(pts) > 0.05).all():
@@ -262,33 +284,48 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
                     cv2.line(img, tuple(px[0]), tuple(px[k]), col, 3)
         return img
 
+    # превью: каждый кадр сжимается один раз на вариант (камера, оверлеи, ширина) и раздаётся всем зрителям
+    preview_cache: dict[tuple, tuple[int, bytes]] = {}
+
+    def _preview_jpeg(cam_id: str, f, overlay: bool, show_board: bool, width: int) -> bytes:
+        key = (cam_id, overlay, show_board, width)
+        hit = preview_cache.get(key)
+        if hit is not None and hit[0] == f.seq:
+            return hit[1]
+        img = f.image
+        if width and img.shape[1] > width:
+            # уменьшаем до оверлея: рисовать и искать доску на маленьком кадре дешевле
+            img = cv2.resize(img, (width, int(img.shape[0] * width / img.shape[1])), interpolation=cv2.INTER_AREA)
+        if overlay:
+            img = _overlay(cam_id, img, show_board)
+        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        data = buf.tobytes()
+        preview_cache[key] = (f.seq, data)
+        return data
+
     @app.get("/api/cameras/{cam_id}/snapshot.jpg")
     async def snapshot(cam_id: str, overlay: int = 1, board_overlay: int = 0, width: int = 640):
         f = _src(cam_id).latest()
         if f is None:
             raise HTTPException(503, "кадров ещё нет")
-        img = _overlay(cam_id, f.image, bool(board_overlay)) if overlay else f.image
-        if width and img.shape[1] > width:
-            img = cv2.resize(img, (width, int(img.shape[0] * width / img.shape[1])))
-        ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 75])
-        return Response(buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
+        data = await asyncio.to_thread(_preview_jpeg, cam_id, f, bool(overlay), bool(board_overlay), width)
+        return Response(data, media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/cameras/{cam_id}/mjpeg")
-    async def mjpeg(cam_id: str, board_overlay: int = 0, width: int = 640, fps: float = 8.0):
+    async def mjpeg(cam_id: str, board_overlay: int = 0, width: int = 640, fps: float = 5.0):
         src = _src(cam_id)
 
         async def gen():
-            last = -1
-            while True:
-                f = src.latest()
-                if f is not None and f.seq != last:
-                    last = f.seq
-                    img = await asyncio.to_thread(_overlay, cam_id, f.image, bool(board_overlay))
-                    if img.shape[1] > width:
-                        img = cv2.resize(img, (width, int(img.shape[0] * width / img.shape[1])))
-                    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 70])
-                    yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n"
-                await asyncio.sleep(1.0 / fps)
+            # пока показываем найденную доску — кадры в полном разрешении, как при калибровке
+            with pipeline.full_res([cam_id]) if board_overlay else contextlib.nullcontext():
+                last = -1
+                while True:
+                    f = src.latest()
+                    if f is not None and f.seq != last:
+                        last = f.seq
+                        data = await asyncio.to_thread(_preview_jpeg, cam_id, f, True, bool(board_overlay), width)
+                        yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + data + b"\r\n"
+                    await asyncio.sleep(1.0 / fps)
 
         return StreamingResponse(gen(), media_type="multipart/x-mixed-replace; boundary=frame")
 
@@ -301,17 +338,21 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
     def _collect_board(cam_ids: list[str], duration: float = 1.2) -> dict[str, list]:
         dets: dict[str, list] = {c: [] for c in cam_ids}
         seen: dict[str, int] = {}
-        t_end = time.time() + duration
-        while time.time() < t_end:
-            for c in cam_ids:
-                f = registry.sources[c].latest()
-                if f is None or seen.get(c) == f.seq:
-                    continue
-                seen[c] = f.seq
-                d = board.detect(f.image)
-                if d is not None:
-                    dets[c].append((f, d))
-            time.sleep(0.03)
+        with pipeline.full_res(cam_ids):
+            t_end = time.time() + FULL_RES_SWITCH_S + duration
+            while time.time() < t_end:
+                for c in cam_ids:
+                    src = registry.sources[c]
+                    f = src.latest()
+                    if f is None or seen.get(c) == f.seq:
+                        continue
+                    seen[c] = f.seq
+                    if not src.is_full_res(f):  # кадр, запрошенный ещё до переключения
+                        continue
+                    d = board.detect(f.image)
+                    if d is not None:
+                        dets[c].append((f, d))
+                time.sleep(0.03)
         return dets
 
     def _do_extrinsics(cam_ids: list[str] | None) -> dict:
@@ -350,7 +391,7 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
                 "hfov_deg": round(new.hfov_deg(), 1),
                 "focal_refined": res.K is not None,
             }
-        pipeline.tracker.reset()
+        pipeline.reset_tracking()
         hub.publish({"type": "cameras", "cameras": registry.describe()})
         return {"ok": any(r["ok"] for r in report.values()), "cameras": report}
 
@@ -360,6 +401,10 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
         return await asyncio.to_thread(_do_extrinsics, cam_ids)
 
     def _intrinsics_job(cam_id: str, n: int, interval: float):
+        with pipeline.full_res([cam_id]):
+            _intrinsics_collect(cam_id, n, interval)
+
+    def _intrinsics_collect(cam_id: str, n: int, interval: float):
         job = state["intr_jobs"][cam_id]
         dets = []
         last_corners = None
@@ -367,11 +412,14 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
         size = None
         t_end = time.time() + max(60.0, n * interval * 6)
         while len(dets) < n and time.time() < t_end and job["state"] == "collecting":
-            f = registry.sources[cam_id].latest()
+            src = registry.sources[cam_id]
+            f = src.latest()
             if f is None or f.seq == seen:
                 time.sleep(0.05)
                 continue
             seen = f.seq
+            if not src.is_full_res(f):
+                continue
             d = board.detect(f.image)
             if d is not None and len(d.ids) >= 8:
                 # пропускаем почти одинаковые кадры — нужны разные ракурсы
@@ -388,7 +436,8 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
             K, dist, rms = calibrate_intrinsics(dets, size)
             old = registry.model(cam_id)
             meta = {"intrinsics": "board", "intrinsics_rms": round(rms, 3), "intrinsics_views": len(dets)}
-            if old is not None and old.calibrated and tuple(old.size) == tuple(size):
+            # модель могла быть пересчитана под уменьшенные кадры трекинга — сравниваем пропорции, а не размер
+            if old is not None and old.calibrated and abs(old.size[0] / old.size[1] - size[0] / size[1]) < 0.01:
                 new = CameraModel(K, dist, size, old.R, old.t, {**old.meta, **meta})
             else:
                 new = CameraModel(K, dist, size, meta=meta)
@@ -438,10 +487,20 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
         return {"ok": True}
 
     # ------------------------------------------------------------------ комната, запись
+    def _latest_full_res(src, timeout: float = 1.5):
+        t_end = time.time() + timeout
+        while time.time() < t_end:
+            f = src.latest()
+            if f is not None and src.is_full_res(f):
+                return f
+            time.sleep(0.03)
+        return src.latest()
+
     def _do_scan() -> dict:
         images, cams = {}, {}
-        for c, src in registry.sources.items():
-            f = src.latest()
+        with pipeline.full_res():
+            frames = {c: _latest_full_res(src) for c, src in list(registry.sources.items())}
+        for c, f in frames.items():
             if f is None:
                 continue
             m = registry.model(c, (f.image.shape[1], f.image.shape[0]))
@@ -475,7 +534,7 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
 
     @app.post("/api/tracks/reset")
     async def api_tracks_reset():
-        pipeline.tracker.reset()
+        pipeline.reset_tracking()
         return {"ok": True}
 
     @app.get("/api/demo/truth")
@@ -483,6 +542,17 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
         if demo_world is None:
             raise HTTPException(404, "только в демо-режиме")
         return JSONResponse({"t": time.time(), "people": [np.round(p, 3).tolist() for p, _ in demo_world.people(time.time())]})
+
+    # ------------------------------------------------------------------ расширения
+    @app.get("/api/ext")
+    async def api_ext():
+        """Скрипты интерфейса расширений (web/ext/*.js) — вьювер подключает их сам."""
+        d = WEB_DIR / "ext"
+        return sorted(p.name for p in d.glob("*.js")) if d.is_dir() else []
+
+    state["extensions"] = load_extensions(app, ExtContext(cfg, registry, pipeline, hub, board, state, data_dir))
+    if state["extensions"]:
+        print(f"[ext] расширения: {', '.join(state['extensions'])}")
 
     return app
 

@@ -1,6 +1,7 @@
 """Запуск сервера Peleng.
 
-    python run.py                 # реальные камеры (config.json + телефоны через /cam)
+    python run.py                 # реальные камеры: телефоны через /cam (+ камеры из config.json, если есть)
+    python run.py --webcam        # то же + вебкамера ноутбука (для домашних тестов)
     python run.py --demo          # без камер: виртуальная комната и люди
     python run.py --replay data/sessions/session_....jsonl
     python run.py --no-https      # только для ноутбука (телефон без HTTPS камеру не отдаст)
@@ -25,11 +26,16 @@ def main() -> None:
     ap.add_argument("--config", help="путь к config.json (по умолчанию backend/config.json, если есть)")
     ap.add_argument("--demo", action="store_true", help="демо без камер")
     ap.add_argument("--replay", help="проиграть записанную сессию .jsonl")
+    ap.add_argument("--webcam", nargs="?", const=0, type=int, metavar="N",
+                    help="добавить вебкамеру ноутбука (индекс N, по умолчанию 0)")
     ap.add_argument("--port", type=int)
     ap.add_argument("--no-https", action="store_true")
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    if args.webcam is not None and not any(c["id"] == "laptop" for c in cfg["cameras"]):
+        cfg["cameras"].append({"id": "laptop", "name": "Вебкамера ноутбука", "source": args.webcam,
+                               "width": 1280, "height": 720, "hfov_deg": 65})
     port = args.port or cfg["server"]["port"]
     use_https = cfg["server"].get("https", True) and not args.no_https
     app = create_app(cfg, demo=args.demo, replay=args.replay)

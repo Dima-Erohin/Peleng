@@ -45,9 +45,14 @@ pip install -r requirements.txt
 python run.py --demo
 ```
 
-С камерами (сначала `copy config.example.json config.json` и поправить):
+С камерами (сначала `copy config.example.json config.json` и поправить). Только телефоны:
 ```bash
 python run.py
+```
+
+Телефоны + вебкамера ноутбука (домашние тесты):
+```bash
+python run.py --webcam
 ```
 
 * Ноутбук: `https://localhost:8443/` — 3D-вьювер и кнопки калибровки.

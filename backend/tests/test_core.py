@@ -1,5 +1,6 @@
 """Проверка геометрии, калибровки и конвейера на синтетических данных (без камер)."""
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -147,3 +148,45 @@ def test_mono_fallback():
     assert len(obs) == 1 and obs[0].mode == "mono"
     truth = world.people(t)[0][1][[15, 16]].mean(axis=0)
     assert np.linalg.norm(obs[0].floor[:2] - truth[:2]) < 0.15
+
+
+def test_frame_lazy_jpeg_and_nearest():
+    from peleng.sources import PushSource
+
+    img = np.full((360, 640, 3), 128, np.uint8)
+    jpeg = cv2.imencode(".jpg", img)[1]
+    src = PushSource("p")
+    src.push_jpeg(jpeg, 10.0)
+    f = src.latest()
+    assert f._image is None, "JPEG не должен распаковываться при приёме"
+    assert f.image.shape == (360, 640, 3)
+    for k, ts in enumerate((10.10, 10.20, 10.30)):
+        src.push(img, ts)
+    assert abs(src.nearest(10.22).ts - 10.20) < 1e-9
+
+
+def test_capture_on_demand(tmp_path):
+    """Пачка берётся, когда пришли кадры от всех телефонов; калибровке достаётся полное разрешение."""
+    from peleng.pipeline import Pipeline
+    from peleng.sources import CameraRegistry, PushSource
+
+    registry = CameraRegistry(tmp_path / "calib")
+    sent: dict[str, list] = {"a": [], "b": []}
+    for cid in sent:
+        src = PushSource(cid)
+        src.info = {"on_demand": True, "vw": 1280, "vh": 720}
+        src.sender = sent[cid].append
+        registry.add(src)
+    cfg = {"pipeline": {"track_width": 640, "capture_timeout_s": 0.3}}
+    pl = Pipeline(cfg, registry, lambda batch: [[] for _ in batch], lambda m: None, tmp_path)
+    pl.request_frames()
+    assert sent["a"][-1] == {"type": "capture", "w": 640}
+    registry.sources["a"].push(np.zeros((360, 640, 3), np.uint8), time.time())
+    assert pl._waiting(), "кадр от b ещё не пришёл"
+    registry.sources["b"].push(np.zeros((360, 640, 3), np.uint8), time.time())
+    assert not pl._waiting()
+    with pl.full_res(["b"]):
+        pl.request_frames()
+        assert sent["a"][-1]["w"] == 640 and sent["b"][-1]["w"] == 0
+    msg = pl.step()
+    assert msg is not None and set(msg["detections"]) == {"a", "b"}

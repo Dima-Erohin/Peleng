@@ -33,10 +33,10 @@
         <option value="960x540">960×540</option>
         <option value="640x480">640×480</option>
       </select>
-      <select id="fps">
-        <option>10</option><option selected>15</option><option>20</option><option>30</option>
+      <select id="fps" title="Частота съёмки камеры. Отправляется столько кадров, сколько просит сервер">
+        <option selected>30</option><option>60</option>
       </select>
-      <label>к/с</label>
+      <label>к/с камеры</label>
     </div>
     <div class="row">
       <button id="start" class="primary">Старт</button>
@@ -50,6 +50,8 @@
 </div>
 <script>
 // Телефон шлёт JPEG-кадры на сервер: [8 байт float64 LE — время кадра в часах сервера][JPEG]
+// Кадр снимается по команде сервера {"type":"capture","w":N}: N — ширина кадра (уменьшаем здесь, чтобы не гнать
+// лишнее по Wi-Fi), 0 — полное разрешение камеры (калибровка). Разрешение в списке — полное разрешение камеры.
 const $ = (id) => document.getElementById(id);
 const v = $("v");
 const canvas = document.createElement("canvas");
@@ -59,7 +61,10 @@ let offset = 0, bestRtt = Infinity;   // серверное_время = Date.no
 let sent = 0, sentT = performance.now(), fpsShown = 0, busy = false;
 
 $("camId").value = localStorage.getItem("peleng.camId") || ("phone" + Math.floor(Math.random() * 90 + 10));
-for (const k of ["res", "fps"]) { const s = localStorage.getItem("peleng." + k); if (s) $(k).value = s; }
+for (const k of ["res", "fps"]) {
+  const s = localStorage.getItem("peleng." + k);
+  if (s && [...$(k).options].some(o => o.value === s)) $(k).value = s;
+}
 
 function err(msg) { $("err").textContent = msg || ""; }
 
@@ -95,12 +100,15 @@ function connect() {
   ws.binaryType = "arraybuffer";
   ws.onopen = () => {
     const s = stream.getVideoTracks()[0].getSettings();
-    ws.send(JSON.stringify({ type: "hello", name: id, ua: navigator.userAgent, width: s.width, height: s.height, frameRate: s.frameRate }));
+    ws.send(JSON.stringify({ type: "hello", name: id, ua: navigator.userAgent, width: s.width, height: s.height, frameRate: s.frameRate,
+                             vw: v.videoWidth, vh: v.videoHeight, on_demand: true }));
     ping();
   };
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
-    if (m.type === "pong") {
+    if (m.type === "capture") {
+      sendFrame(m.w || 0);
+    } else if (m.type === "pong") {
       const now = Date.now();
       const rtt = now - m.tc;
       // берём замер с минимальной задержкой — он точнее (как в NTP)
@@ -116,14 +124,19 @@ function ping() { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 
 setInterval(ping, 2000);
 setInterval(() => { bestRtt *= 1.05; }, 5000); // постепенно «забываем» старый лучший замер
 
-function sendFrame() {
+let pendingW = null;  // команда пришла, пока предыдущий кадр ещё сжимался — снимем сразу после
+function sendFrame(w) {
   if (!running) return;
   const ws_ = ws;
-  if (!ws_ || ws_.readyState !== 1 || busy || ws_.bufferedAmount > 1.5e6 || !v.videoWidth) return;
+  if (!ws_ || ws_.readyState !== 1 || ws_.bufferedAmount > 1.5e6 || !v.videoWidth) return;
+  if (busy) { pendingW = w; return; }
   busy = true;
   const tCapture = Date.now() / 1000 + offset;
-  canvas.width = v.videoWidth; canvas.height = v.videoHeight;
-  ctx.drawImage(v, 0, 0);
+  const vw = v.videoWidth, vh = v.videoHeight;
+  const tw = w && w < vw ? w : vw;
+  const th = Math.round(vh * tw / vw / 2) * 2;
+  if (canvas.width !== tw || canvas.height !== th) { canvas.width = tw; canvas.height = th; }
+  ctx.drawImage(v, 0, 0, tw, th);
   canvas.toBlob(async (blob) => {
     try {
       if (blob && ws_.readyState === 1) {
@@ -131,23 +144,21 @@ function sendFrame() {
         new DataView(buf.buffer).setFloat64(0, tCapture, true);
         buf.set(new Uint8Array(await blob.arrayBuffer()), 8);
         ws_.send(buf);
-        sent++;
+        sent++; lastSize = `${tw}×${th}`;
       }
-    } finally { busy = false; }
+    } finally {
+      busy = false;
+      if (pendingW !== null) { const pw = pendingW; pendingW = null; sendFrame(pw); }
+    }
   }, "image/jpeg", 0.75);
 }
-
-let timer = null;
-function loop() {
-  clearInterval(timer);
-  timer = setInterval(sendFrame, 1000 / Number($("fps").value));
-}
+let lastSize = "";
 
 setInterval(() => {
   const now = performance.now();
   fpsShown = sent * 1000 / (now - sentT); sent = 0; sentT = now;
   if (running) $("status").textContent =
-    `${v.videoWidth}×${v.videoHeight} | отправка ${fpsShown.toFixed(1)} к/с | RTT ${lastRtt} мс | ` +
+    `камера ${v.videoWidth}×${v.videoHeight} | отправка ${fpsShown.toFixed(1)} к/с ${lastSize} | RTT ${lastRtt} мс | ` +
     (ws && ws.readyState === 1 ? "подключено" : "переподключение…");
 }, 1000);
 
@@ -165,14 +176,13 @@ $("start").onclick = async () => {
   } catch (e) { err("Камера: " + e.message); return; }
   running = true;
   connect();
-  loop();
   try { wakeLock = await navigator.wakeLock?.request("screen"); } catch (e) { /* не везде есть */ }
   $("start").classList.add("hide"); $("stop").classList.remove("hide");
 };
 
 $("stop").onclick = () => {
   running = false;
-  clearInterval(timer);
+  pendingW = null;
   if (ws) ws.close();
   if (stream) stream.getTracks().forEach(t => t.stop());
   wakeLock?.release?.();
