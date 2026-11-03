@@ -12,6 +12,9 @@
   * Координаты — пиксели исходного кадра (не уменьшенного).
   * point_px — точка объекта, которую надо триангулировать (по умолчанию центр рамки); детектор может
     задать свою (например, центр масс маски).
+  * extra — произвольные данные (сохраняются в кэш, если сериализуемы в JSON). Ключевые точки — в
+    extra["kp"] = {"имя": [u, v, conf]}; трекер с point="kp:имя" измеряет именно эту точку (например,
+    point="kp:pivot" для детектора позы грузовика), а при её отсутствии — центр рамки.
   * score в [0, 1]; cls — строка ("truck", "drone", "motion", ...); source — имя детектора.
   * camera_model — модель камеры на этот кадр (рабочая система координат, см. ue_data.py); может
     пригодиться, например, для компенсации поворота камеры.
@@ -44,12 +47,51 @@ class Detection:
         return float(np.sqrt(w * h))
 
     def to_list(self) -> list:
-        return [round(float(v), 2) for v in self.bbox] + [round(float(self.point_px[0]), 2), round(float(self.point_px[1]), 2),
-                                                          round(float(self.score), 4), self.cls, self.source]
+        out = [round(float(v), 2) for v in self.bbox] + [round(float(self.point_px[0]), 2), round(float(self.point_px[1]), 2),
+                                                         round(float(self.score), 4), self.cls, self.source]
+        ex = _jsonable(self.extra)
+        if ex:
+            out.append(ex)  # 10-й элемент — extra (например, ключевые точки "kp": {"pivot": [u, v, conf]})
+        return out
 
     @classmethod
     def from_list(cls, a: list) -> "Detection":
-        return cls(tuple(a[0:4]), (a[4], a[5]), a[6], a[7], a[8] if len(a) > 8 else "")
+        return cls(tuple(a[0:4]), (a[4], a[5]), a[6], a[7], a[8] if len(a) > 8 else "",
+                   dict(a[9]) if len(a) > 9 and isinstance(a[9], dict) else {})
+
+    def keypoint(self, name: str):
+        """Ключевая точка из extra: extra["kp"][name] = [u, v] или [u, v, conf]; иначе None."""
+        kp = (self.extra or {}).get("kp") or {}
+        v = kp.get(name) if isinstance(kp, dict) else None
+        if v is None or len(v) < 2:
+            return None
+        if len(v) > 2 and v[2] is not None and float(v[2]) < 0.3:
+            return None
+        return float(v[0]), float(v[1])
+
+
+def _jsonable(x):
+    """Оставить только то, что сериализуется в JSON (числа, строки, списки, словари); numpy -> списки."""
+    if isinstance(x, dict):
+        out = {}
+        for k, v in x.items():
+            j = _jsonable(v)
+            if j is not None:
+                out[str(k)] = j
+        return out
+    if isinstance(x, (list, tuple)):
+        return [_jsonable(v) for v in x]
+    if isinstance(x, np.ndarray):
+        return np.round(x.astype(float), 3).tolist()
+    if isinstance(x, (bool, np.bool_)):
+        return bool(x)
+    if isinstance(x, (int, np.integer)):
+        return int(x)
+    if isinstance(x, (float, np.floating)):
+        return round(float(x), 3)
+    if isinstance(x, str) or x is None:
+        return x
+    return None
 
 
 class Detector:

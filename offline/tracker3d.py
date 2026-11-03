@@ -64,7 +64,9 @@ class TrackerConfig:
     object_size_m: float | None = None  # априорный размер объекта (м) по size_dim: дальность по размеру без обучения
     size_dim: str = "height"  # какой размер рамки сравнивать: height | width | geom
     object_size_rel_std: float = 0.5  # относительная σ дальности по априорному размеру
-    mono_init: bool = True  # создавать трек по одной камере (только если задан object_size_m)
+    mono_init: bool = True  # создавать трек по одной камере (по выученному для камеры или априорному размеру)
+    prior_init_first_only: bool = False  # априорный размер — только для самого первого создания трека
+    reacq_prior: bool = True  # перезахват по одной камере с априорным размером (иначе — только с выученным)
     size_learn_alpha: float = 0.1
     size_rel_min: float = 0.04  # σ дальности по выученному размеру сразу после обучения (доля дальности)
     size_rel_growth: float | None = None  # рост σ в секунду с последнего обучения (None — постоянная size_range_rel_std)
@@ -130,6 +132,11 @@ def project_jac(cam, p: np.ndarray) -> tuple[np.ndarray, np.ndarray, float]:
 
 def det_point(d: Detection, mode: str) -> np.ndarray:
     x1, y1, x2, y2 = d.bbox
+    if mode.startswith("kp:"):
+        kp = d.keypoint(mode[3:])
+        if kp is not None:
+            return np.array(kp)
+        return np.array([(x1 + x2) / 2, (y1 + y2) / 2])
     if mode == "bottom":
         return np.array([(x1 + x2) / 2, y2])
     if mode == "top":
@@ -699,8 +706,10 @@ class Tracker3D:
                 mode, used, reproj = "init", [cam_ids[i] for i, _ in views], float(np.mean(errs))
                 info["used_det"] = [(i, all_cands[i][j][0]) for i, j in views]
                 self._learn_size(cams, all_cands, views, cam_ids)
-            elif c.object_size_m is not None and c.mono_init:
-                mono = self._mono_init_candidate(cams, all_cands, cam_ids)
+            elif c.mono_init and (self.size_phys or c.object_size_m is not None):
+                # по одной камере: размер, выученный для неё, или априорный (если разрешено в этот момент)
+                prior_ok = c.object_size_m is not None and (self.x is None or not c.prior_init_first_only)
+                mono = self._mono_init_candidate(cams, all_cands, cam_ids, prior_ok)
                 if mono is not None:
                     i, j, X, cov = mono
                     self._init(X, cov, frame, self.x[self.nk:].copy() if (self.box and self.x is not None) else None)
@@ -789,8 +798,8 @@ class Tracker3D:
                 self.reinit_count = 0
             # перезахват по одной камере: трек только прогнозируется, а устойчивая (несколько кадров подряд
             # на одном месте) детекция вне гейта есть — создать трек заново по лучу и размеру
-            if mode == "predict" and (c.object_size_m is not None or self.size_phys) and c.mono_init:
-                mono = self._mono_init_candidate(cams, all_cands, cam_ids)
+            if mode == "predict" and ((c.object_size_m is not None and c.reacq_prior) or self.size_phys) and c.mono_init:
+                mono = self._mono_init_candidate(cams, all_cands, cam_ids, c.reacq_prior)
                 if mono is not None:
                     i, j, X, cov = mono
                     uv = all_cands[i][j][1]
@@ -861,11 +870,13 @@ class Tracker3D:
             return float(np.sqrt(max(w, 0) * max(h, 0)))
         return float(h)
 
-    def _mono_init_candidate(self, cams, all_cands, cam_ids):
+    def _mono_init_candidate(self, cams, all_cands, cam_ids, prior_ok: bool = True):
         """Создание трека по одной камере: точка на луче на дальности f·H/h_px (H — выученный или априорный размер)."""
         c = self.cfg
         best = None
         for i, cl in enumerate(all_cands):
+            if cam_ids[i] not in self.size_phys and (c.object_size_m is None or not prior_ok):
+                continue  # размер для этой камеры неизвестен — дальность не оценить
             for j, (_, uv, s, d) in enumerate(cl):
                 if d.score < c.init_min_score or d.cls in c.box_point_classes:
                     continue
