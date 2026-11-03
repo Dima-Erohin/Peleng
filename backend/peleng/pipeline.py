@@ -55,6 +55,8 @@ class Pipeline:
         self.hello_provider: Callable[[], dict] | None = None
         self.frame_hooks: list[Callable[[FrameContext], None]] = []  # расширения: дополнить сообщение "frame"
         self.reset_hooks: list[Callable[[], None]] = []  # расширения: сбросить свои треки
+        self.record_start_hooks: list[Callable[[Path], None]] = []  # расширения: началась запись сессии (путь .jsonl)
+        self.record_stop_hooks: list[Callable[[Path], None]] = []  # расширения: запись остановлена (путь .jsonl)
         self._full_res: dict[str, int] = {}  # камера (или "*") -> сколько потребителей ждут полное разрешение
         self._full_lock = threading.Lock()
         self._pending: tuple[float, dict[str, int]] | None = None  # (время запроса, {камера: seq на момент запроса})
@@ -138,7 +140,9 @@ class Pipeline:
             self._rec = open(self._rec_path, "w", encoding="utf-8")
             if self.hello_provider:
                 self._rec.write(json.dumps(self.hello_provider(), ensure_ascii=False) + "\n")
-            return str(self._rec_path)
+            path = self._rec_path
+        self._run_record_hooks(self.record_start_hooks, path)  # вне блокировки: хуки не задерживают запись сообщений
+        return str(path)
 
     def stop_recording(self) -> str | None:
         with self._rec_lock:
@@ -146,7 +150,16 @@ class Pipeline:
                 return None
             self._rec.close()
             self._rec = None
-            return str(self._rec_path)
+            path = self._rec_path
+        self._run_record_hooks(self.record_stop_hooks, path)
+        return str(path)
+
+    def _run_record_hooks(self, hooks, path) -> None:
+        for hook in list(hooks):
+            try:
+                hook(path)
+            except Exception as e:  # noqa: BLE001 — расширение не должно ломать запись
+                print(f"[pipeline] ошибка в {getattr(hook, '__name__', hook)}: {e!r}")
 
     @property
     def recording(self) -> str | None:

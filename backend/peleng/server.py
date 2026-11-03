@@ -71,7 +71,8 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
     board = Board(cfg["board"])
     registry = CameraRegistry(data_dir / "calib", cfg.get("default_hfov_deg", 68.0))
     hub = Hub()
-    state: dict = {"room_points": None, "intr_jobs": {}, "mode": "replay" if replay else ("demo" if demo else "live")}
+    state: dict = {"room_points": None, "intr_jobs": {}, "mode": "replay" if replay else ("demo" if demo else "live"),
+             "replay_path": replay, "replay_t": None}  # replay_t — время текущего проигрываемого кадра (для ext/frames)
 
     detector_box: dict = {"fn": _null_detector, "status": "нет"}
     demo_world = None
@@ -163,6 +164,7 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
             for m in frames:
                 time.sleep(max(0.0, min(1.0, m["t"] - t_prev)))
                 t_prev = m["t"]
+                state["replay_t"] = m["t"]
                 hub.publish(m)
 
     # ------------------------------------------------------------------ страницы
