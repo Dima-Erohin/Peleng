@@ -1,9 +1,10 @@
-"""Точка входа офлайн-конвейера: один запуск -> траектория CSV + служебный CSV + графики + метрики.
+"""Точка входа офлайн-конвейера: один запуск -> CSV траекторий объектов + служебные файлы + графики + метрики.
 
-    python offline/run.py --data <папка с mp4 и csv> --out <папка результатов> [--detector yolo+bg] [--max-frames N]
+    python offline/run.py --data <папка с mp4 и csv> --out <папка результатов> [--objects truck,drone] [--max-frames N]
 
-Шаги: загрузка набора -> детекция во всех камерах (кэш в <out>) -> причинный 3D-трекинг -> запись
-trajectory.csv (формат эталона: Frame;Loc_X;Loc_Y;Loc_Z, см Unreal) -> оценка и графики, если в папке есть эталон.
+Для каждого объекта (пресеты — offline/presets.py): детекция во всех камерах (кэш в <out>/<объект>/) ->
+причинный 3D-трекинг -> <out>/<объект>.csv (формат эталона: Frame;Loc_X;Loc_Y;Loc_Z, см Unreal) ->
+служебный CSV, графики, метрики (если есть эталон и объект с ним сравнивается) -> <out>/viewer.json для фронтенда.
 """
 from __future__ import annotations
 
@@ -23,19 +24,81 @@ if __package__ in (None, ""):
     __package__ = "offline"
 
 from .detect_stage import run_detection  # noqa: E402
-from .tracker3d import Tracker3D, TrackerConfig  # noqa: E402
+from .tracker3d import FrameResult, Tracker3D, TrackerConfig  # noqa: E402
 from .ue_data import load_dataset, world_to_ue, write_ue_csv  # noqa: E402
 
 
-def track(ds, frames: list, cfg: TrackerConfig, n: int):
-    """Причинный трекинг: кадр за кадром, выход кадра k зависит только от детекций кадров <= k."""
-    tr = Tracker3D(cfg)
+class _Single:
+    """Обёртка одиночного трекера под общий интерфейс с MultiTracker3D."""
+
+    def __init__(self, cfg):
+        self.tr = Tracker3D(cfg)
+
+    def trackers(self):
+        return [self.tr]
+
+    def step(self, k, cams, dets, ids):
+        return {1: self.tr.step(k, cams, dets, ids)}
+
+    def primary(self, res):
+        return 1
+
+
+def track(ds, frames: list, cfg: TrackerConfig, n: int, refiner=None, log=print, multi: int = 0):
+    """Причинный трекинг: кадр за кадром, выход кадра k зависит только от детекций кадров <= k.
+
+    refiner (RoiRefiner) — сильный детектор в окне вокруг прогноза трекера (прогноз — по кадрам < k).
+    multi > 0 — несколько объектов (MultiTracker3D, не больше multi треков); основной объект — в первом результате.
+    Возвращает (results основного объекта по кадрам, трекер, детекции по кадрам, все треки {кадр: {id: FrameResult}})."""
+    from .tracker3d import MultiTracker3D
+
+    mt = MultiTracker3D(cfg, max_tracks=multi) if multi > 0 else _Single(cfg)
     ids = [c.cam_id for c in ds.cameras]
-    out = []
+    out, used_dets, all_tracks = [], [], []
+    reader = None
+    if refiner is not None:
+        from .roi_refine import merge
+        from .ue_data import SyncVideoReader
+
+        reader = iter(SyncVideoReader([c.video_path for c in ds.cameras], n))
+    t0 = time.time()
     for k in range(n):
         cams = [c.model(k) for c in ds.cameras]
-        out.append(tr.step(k, cams, frames[k], ids))
-    return out, tr
+        row = frames[k]
+        if reader is not None:
+            _, imgs = next(reader)
+            trs = mt.trackers() if hasattr(mt, "trackers") else [t for _, t in mt.tracks]
+            regs = [t.predict_regions(cams) for t in trs]
+            lost = not trs or all(t._lost() for t in trs)
+            row = []
+            for i, (cam, img) in enumerate(zip(cams, imgs)):
+                base = frames[k][i]
+                wins = [refiner.window(r[i], cam.size) for r in regs if r[i] is not None]
+                if lost or multi > 0:
+                    # трек потерян (или ищем новые объекты): окна вокруг лучших кандидатов базового детектора
+                    for d in sorted(base, key=lambda d: -d.score)[:1]:
+                        if d.score >= 0.25:
+                            wins.append(refiner.window(d.bbox, cam.size))
+                roi = []
+                if img is not None:
+                    for w in dict.fromkeys(wins):
+                        roi += refiner.detect(ids[i], k, img, w)
+                row.append(merge(base, roi))
+            if k % 100 == 0:
+                log(f"  трекинг+ROI: кадр {k}/{n}, {time.time() - t0:.0f} c, окон: сеть {refiner.n_run}, кэш {refiner.n_cached}")
+        res = mt.step(k, cams, row, ids)
+        pid = mt.primary(res)
+        if pid is None:
+            out.append(FrameResult(k, None, None, "none", 0, [], float("inf")))
+        else:
+            r = res[pid]
+            r.info["track_id"] = pid
+            out.append(r)
+        all_tracks.append(res)
+        used_dets.append(row)
+    if refiner is not None:
+        refiner.save()
+    return out, mt, used_dets, all_tracks
 
 
 def results_to_arrays(res):
@@ -49,12 +112,14 @@ def results_to_arrays(res):
 
 def write_diag(path: Path, res, P_ue) -> None:
     with open(path, "w", encoding="utf-8", newline="") as f:
-        f.write("Frame;mode;n_cams;cams;sigma_m;reproj_px;speed_mps;Loc_X;Loc_Y;Loc_Z\r\n")
+        f.write("Frame;mode;n_cams;cams;used_det;sigma_m;reproj_px;speed_mps;Loc_X;Loc_Y;Loc_Z\r\n")
         for r, p in zip(res, P_ue):
             sp = float(np.linalg.norm(r.vel)) if r.vel is not None else float("nan")
             cams = ",".join(str(c) for c in r.cams)
+            # used_det: «индекс камеры в наборе:индекс детекции» — какие детекции вошли в обновление
+            used = ",".join(f"{i}:{j}" for i, j in r.info.get("used_det", []))
             xyz = ";".join("" if not np.isfinite(v) else f"{v:.4f}" for v in p)
-            f.write(f"{r.frame};{r.mode};{r.n_cams};{cams};{r.sigma_m:.3f};{r.reproj_px:.2f};{sp:.2f};{xyz}\r\n")
+            f.write(f"{r.frame};{r.mode};{r.n_cams};{cams};{used};{r.sigma_m:.3f};{r.reproj_px:.2f};{sp:.2f};{xyz}\r\n")
 
 
 def _sha256(path: Path) -> str:
@@ -73,42 +138,129 @@ def _git_rev() -> str | None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(description="3D-траектория объекта по видео нескольких камер (причинная обработка)")
+    ap = argparse.ArgumentParser(description="3D-траектории объектов по видео нескольких камер (причинная обработка)")
     ap.add_argument("--data", required=True, help="папка с видео *.mp4 и CSV камер object_transform_*N.csv")
     ap.add_argument("--out", required=True, help="папка результатов")
-    ap.add_argument("--detector", default="yolo+bg", help="yolo+bg | yolo | bg | модуль:Класс")
-    ap.add_argument("--yolo-weights", default="yolo11n.pt")
-    ap.add_argument("--yolo-classes", default="truck,car,bus", help="через запятую; пусто — все классы")
-    ap.add_argument("--yolo-imgsz", type=int, default=640)
-    ap.add_argument("--yolo-conf", type=float, default=0.15)
+    ap.add_argument("--objects", default="truck,drone", help="пресеты объектов через запятую (offline/presets.py)")
+    ap.add_argument("--objects-file", default=None, help="JSON со списком описаний объектов (вместо --objects)")
+    ap.add_argument("--set", action="append", default=[], metavar="ОБЪЕКТ.ключ=значение",
+                    help="переопределить поле описания: truck.tracker.accel_std=2, drone.detections=/путь.json")
     ap.add_argument("--max-frames", type=int, default=None)
     ap.add_argument("--no-cache", action="store_true", help="не брать детекции из кэша")
-    ap.add_argument("--point", default="center", choices=["center", "bottom", "top", "detector"],
-                    help="какую точку рамки триангулировать")
-    ap.add_argument("--model", default="cv", choices=["cv", "ca"], help="модель движения: постоянная скорость / ускорение")
-    ap.add_argument("--accel-std", type=float, default=3.0, help="σ ускорения (cv), м/с²")
-    ap.add_argument("--no-size-range", action="store_true", help="не использовать дальность по размеру рамки при одной камере")
-    ap.add_argument("--offset-fwd", type=float, default=0.0, help="сдвиг выходной точки вперёд по курсу, м")
-    ap.add_argument("--offset-up", type=float, default=0.0, help="сдвиг выходной точки вверх, м")
     ap.add_argument("--truth", default=None, help="имя CSV эталона в папке данных (по умолчанию — найти автоматически)")
     ap.add_argument("--no-plots", action="store_true")
-    ap.add_argument("--tag", default="", help="подпись для графиков")
+    ap.add_argument("--no-viewer", action="store_true", help="не писать viewer.json")
+    ap.add_argument("--skip-missing", action="store_true",
+                    help="пропускать объект, если его детектор недоступен (иначе — ошибка)")
     return ap
 
 
-def make_detector_from_args(a):
-    from .basic_detectors import make_detector
+def build_detector_frames(ds, spec: dict, n: int, out: Path, use_cache: bool):
+    """Детекции объекта по кадрам: из файла, из кэша или запуском детектора. Возвращает (frames, stats, config)."""
+    from .basic_detectors import combine_dets, make_detector
+    from .detect_stage import load_detections_file
 
-    classes = tuple(c.strip() for c in a.yolo_classes.split(",") if c.strip())
-    ykw = dict(weights=a.yolo_weights, classes=classes, imgsz=a.yolo_imgsz, conf=a.yolo_conf)
-    if a.detector == "yolo":
-        return make_detector("yolo", **ykw)
-    if a.detector in ("yolo+bg", "bg+yolo"):
-        return make_detector("yolo+bg", **{"yolo_" + k: v for k, v in ykw.items()})
-    return make_detector(a.detector)
+    if spec.get("detections"):
+        return load_detections_file(spec["detections"], ds, n), {"file": str(spec["detections"])}, {"file": str(spec["detections"])}
+    name = spec["detector"]
+    kw = dict(spec.get("detector_kw") or {})
+    if name in ("yolo+bg", "bg+yolo"):
+        ykw = {k[5:]: v for k, v in kw.items() if k.startswith("yolo_")}
+        bkw = {k[3:]: v for k, v in kw.items() if k.startswith("bg_")}
+        if "classes" in ykw:
+            ykw["classes"] = tuple(ykw["classes"])
+        dy, db = make_detector("yolo", **ykw), make_detector("bg", **bkw)
+        # два прохода с отдельными кэшами: можно менять один детектор, не пересчитывая другой
+        fy, sy = run_detection(ds, dy, n, out, use_cache=use_cache)
+        fb, sb = run_detection(ds, db, n, out, use_cache=use_cache)
+        frames = [[combine_dets(y, b) for y, b in zip(ry, rb)] for ry, rb in zip(fy, fb)]
+        return frames, {"yolo": sy, "bg": sb, "seconds": sy.get("seconds", 0) + sb.get("seconds", 0)}, \
+            {"yolo": dy.config(), "bg": db.config()}
+    if name in ("yolo", "bg") and "classes" in kw:
+        kw["classes"] = tuple(kw["classes"])
+    det = make_detector(name, **kw)
+    frames, st = run_detection(ds, det, n, out, use_cache=use_cache)
+    return frames, st, det.config() if hasattr(det, "config") else {"name": name}
+
+
+def run_object(ds, spec: dict, n: int, out_root: Path, a) -> dict:
+    """Полный цикл для одного объекта. Возвращает сводку (пути, режимы, метрики)."""
+    name = spec["name"]
+    out = out_root / name
+    out.mkdir(parents=True, exist_ok=True)
+    t0 = time.time()
+    print(f"=== объект {name}: детектор {spec.get('detections') or spec['detector']}", flush=True)
+    frames, dstats, dcfg = build_detector_frames(ds, spec, n, out, not a.no_cache)
+    t_det = time.time()
+    tk = dict(spec.get("tracker") or {})
+    tk.setdefault("fps", ds.fps)
+    tk["fps"] = ds.fps
+    cfg = TrackerConfig(**tk)
+    refiner = None
+    if spec.get("roi"):
+        from .roi_refine import RoiRefiner
+
+        r = spec["roi"]
+        refiner = RoiRefiner(r.get("weights", "yolo11m.pt"), imgsz=r.get("imgsz", 640), classes=tuple(r.get("classes", ())),
+                             conf=r.get("conf", 0.1),
+                             cache_path=out / f"roi_cache_{Path(r.get('weights', 'yolo11m.pt')).stem}_{r.get('imgsz', 640)}.json")
+    res, _, used, all_tracks = track(ds, frames, cfg, n, refiner, log=lambda m: print(m, flush=True),
+                                     multi=int(spec.get("multi", 0)))
+    t_trk = time.time()
+    (out / "detections_used.json").write_text(json.dumps({
+        "note": "детекции, поданные в трекер, frames[k][i] -> камера cams[i]",
+        "cams": [c.cam_id for c in ds.cameras], "n_frames": n,
+        "frames": [[[d.to_list() for d in cam] for cam in fr] for fr in used]}))
+    P_ue, n_cams, modes, sig = results_to_arrays(res)
+    if spec.get("fill_before_init", "first") == "first":
+        ok = np.where(np.isfinite(P_ue[:, 0]))[0]
+        if len(ok) and ok[0] > 0:
+            # единственное отступление ради полноты файла: до первой оценки объект не наблюдался —
+            # пишем первую оценку (в служебном файле эти кадры помечены mode=none)
+            P_ue[: ok[0]] = P_ue[ok[0]]
+    csv_path = out_root / spec.get("out_csv", f"{name}.csv")
+    write_ue_csv(csv_path, np.arange(n), P_ue)
+    write_diag(out_root / (Path(spec.get("out_csv", f"{name}.csv")).stem + "_diag.csv"), res, P_ue)
+    uniq, cnt = np.unique(modes, return_counts=True)
+    summary = {
+        "name": name, "csv": str(csv_path), "detector": dcfg, "tracker": cfg.__dict__, "detection": dstats,
+        "modes": dict(zip(uniq.tolist(), cnt.tolist())),
+        "time_s": {"detection": round(t_det - t0, 1), "tracking": round(t_trk - t_det, 2)},
+        "reproj_px_median": float(np.nanmedian([r.reproj_px for r in res if r.mode == "tri"])) if any(r.mode == "tri" for r in res) else None,
+    }
+    # согласованность без эталона: плавность (ускорение по 2-й разности) и ошибка репроекции
+    Pw = P_ue / 100.0
+    acc = np.linalg.norm(np.diff(Pw, 2, axis=0), axis=1) * ds.fps ** 2
+    summary["smoothness"] = {"accel_median_mps2": float(np.nanmedian(acc)) if np.isfinite(acc).any() else None,
+                             "accel_p95_mps2": float(np.nanpercentile(acc, 95)) if np.isfinite(acc).any() else None}
+    if refiner is not None:
+        summary["roi"] = {**refiner.config(), "runs": refiner.n_run, "cached": refiner.n_cached, "model_s": round(refiner.t_model, 1)}
+    print(f"режимы: {summary['modes']}; детекция {summary['time_s']['detection']} c, трекинг {summary['time_s']['tracking']} c",
+          flush=True)
+    truth = ds.truth_ue[:n] if (spec.get("truth") and ds.truth_ue is not None) else None
+    if truth is not None:
+        from .evaluate import evaluate, format_report, to_jsonable
+
+        metrics = evaluate(P_ue, truth, n_cams, modes)
+        rep = format_report(metrics)
+        print(rep, flush=True)
+        (out / "metrics.txt").write_text(rep + "\n", encoding="utf-8")
+        (out / "metrics.json").write_text(json.dumps(to_jsonable(metrics), ensure_ascii=False, indent=1), encoding="utf-8")
+        summary["metrics"] = {"rmse3d_m": metrics["err3d"].get("rmse"), "median3d_m": metrics["err3d"].get("median"),
+                              "by_ncams": metrics.get("by_ncams")}
+    if not a.no_plots:
+        from .plots import make_plots
+
+        summary["plots"] = [str(p) for p in make_plots(out, P_ue, truth, modes, n_cams, sig, name)]
+    summary["sha256"] = _sha256(csv_path)
+    summary["_P_ue"] = P_ue
+    summary["_res"] = res
+    return summary
 
 
 def main(argv=None) -> dict:
+    from .presets import get_specs
+
     a = build_parser().parse_args(argv)
     t_start = time.time()
     out = Path(a.out)
@@ -117,49 +269,31 @@ def main(argv=None) -> dict:
     n = ds.n_frames if a.max_frames is None else min(ds.n_frames, a.max_frames)
     print(f"набор: {len(ds.cameras)} камер {[c.cam_id for c in ds.cameras]}, кадров {n}, fps {ds.fps:.2f}, "
           f"эталон: {'есть' if ds.truth_ue is not None else 'нет'}", flush=True)
-
-    det = make_detector_from_args(a)
-    frames, dstats = run_detection(ds, det, n, out, use_cache=not a.no_cache)
-    t_det = time.time()
-
-    cfg = TrackerConfig(fps=ds.fps, model=a.model, accel_std=a.accel_std, point=a.point,
-                        size_range=not a.no_size_range, out_offset_fwd_m=a.offset_fwd, out_offset_up_m=a.offset_up)
-    res, _ = track(ds, frames, cfg, n)
-    t_trk = time.time()
-    P_ue, n_cams, modes, sig = results_to_arrays(res)
-
-    traj = out / "trajectory.csv"
-    write_ue_csv(traj, np.arange(n), P_ue)
-    write_diag(out / "trajectory_diag.csv", res, P_ue)
-    uniq, cnt = np.unique(modes, return_counts=True)
+    specs = get_specs([x.strip() for x in a.objects.split(",") if x.strip()], a.objects_file, a.set)
+    results = []
+    for spec in specs:
+        try:
+            results.append(run_object(ds, spec, n, out, a))
+        except (ImportError, AttributeError, FileNotFoundError) as e:
+            if not a.skip_missing:
+                raise
+            print(f"!!! объект {spec['name']} пропущен: детектор недоступен ({e})", flush=True)
     info = {
-        "script": "offline/run.py", "args": vars(a), "git": _git_rev(), "python": platform.python_version(),
-        "frames": n, "cameras": [c.cam_id for c in ds.cameras], "detector": det.config() if hasattr(det, "config") else str(det),
-        "tracker": cfg.__dict__, "detection": dstats, "modes": dict(zip(uniq.tolist(), cnt.tolist())),
-        "time_s": {"detection": round(t_det - t_start, 1), "tracking": round(t_trk - t_det, 2)},
+        "script": "offline/run.py", "argv": sys.argv[1:] if argv is None else argv, "git": _git_rev(),
+        "python": platform.python_version(), "frames": n, "cameras": [c.cam_id for c in ds.cameras],
+        "objects": [{k: v for k, v in r.items() if not k.startswith("_")} for r in results],
+        "time_s": round(time.time() - t_start, 1),
     }
-    print(f"режимы: {info['modes']}; детекция {info['time_s']['detection']} c, трекинг {info['time_s']['tracking']} c", flush=True)
-
-    metrics = None
-    if ds.truth_ue is not None:
-        from .evaluate import evaluate, format_report, to_jsonable
-
-        metrics = evaluate(P_ue, ds.truth_ue[:n], n_cams, modes)
-        rep = format_report(metrics)
-        print(rep)
-        (out / "metrics.txt").write_text(rep + "\n", encoding="utf-8")
-        (out / "metrics.json").write_text(json.dumps(to_jsonable(metrics), ensure_ascii=False, indent=1), encoding="utf-8")
-        info["metrics_summary"] = {"rmse3d_m": metrics["err3d"].get("rmse"), "median3d_m": metrics["err3d"].get("median")}
-    if not a.no_plots:
-        from .plots import make_plots
-
-        paths = make_plots(out, P_ue, None if ds.truth_ue is None else ds.truth_ue[:n], modes, n_cams, sig, a.tag)
-        info["plots"] = [str(p) for p in paths]
-    info["time_s"]["total"] = round(time.time() - t_start, 1)
-    info["trajectory_sha256"] = _sha256(traj)
     (out / "run_info.json").write_text(json.dumps(info, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-    print(f"готово: {traj}  ({info['time_s']['total']} c)", flush=True)
-    return {"info": info, "metrics": metrics, "results": res}
+    if not a.no_viewer and results:
+        from .export_viewer import build_multi
+
+        vj = build_multi(ds, out, results, n)
+        (out / "viewer.json").write_text(json.dumps(vj, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    for r in results:
+        print(f"готово: {r['csv']}" + (f"  RMSE {r['metrics']['rmse3d_m']:.2f} м" if r.get("metrics") else ""), flush=True)
+    print(f"всего {info['time_s']} c", flush=True)
+    return {"info": info, "results": results}
 
 
 if __name__ == "__main__":

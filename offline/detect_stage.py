@@ -33,6 +33,35 @@ def load_cache(path: Path, n_frames: int):
     return [[[Detection.from_list(x) for x in cam] for cam in fr] for fr in d["frames"][:n_frames]]
 
 
+def load_detections_file(path, ds: UEDataset, n_frames: int) -> list:
+    """Готовые детекции из JSON: {"cams": [id...]?, "frames": [[[det...] на камеру] на кадр]}.
+
+    Детекция — список [x1, y1, x2, y2, u, v, score, cls, source] (как в кэше) или словарь
+    {"bbox": [x1,y1,x2,y2], "point_px": [u,v]?, "score", "cls"?}. Порядок камер — "cams" (id) или как в наборе."""
+    d = json.loads(Path(path).read_text())
+    ids = d.get("cams") or [c.cam_id for c in ds.cameras]
+    pos = {cid: i for i, cid in enumerate(ids)}
+    out = []
+    fr = d["frames"]
+    for k in range(n_frames):
+        row = []
+        src = fr[k] if k < len(fr) else [[] for _ in ids]
+        for c in ds.cameras:
+            lst = src[pos[c.cam_id]] if c.cam_id in pos and pos[c.cam_id] < len(src) else []
+            dets = []
+            for x in lst:
+                if isinstance(x, dict):
+                    b = x["bbox"]
+                    pt = x.get("point_px") or ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
+                    dets.append(Detection(tuple(b), tuple(pt), float(x.get("score", 1.0)), x.get("cls", "object"),
+                                          x.get("source", "file")))
+                else:
+                    dets.append(Detection.from_list(x))
+            row.append(dets)
+        out.append(row)
+    return out
+
+
 def _log(msg: str) -> None:
     print(msg, flush=True)
 

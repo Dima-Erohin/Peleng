@@ -182,3 +182,147 @@ def test_models(model):
     T, cams, frames = run_synth(150)
     E, _ = track_frames(cams, frames, TrackerConfig(fps=FPS, model=model))
     assert np.sqrt(np.nanmean(np.linalg.norm(E - T, axis=1) ** 2)) < 2.0
+
+
+def box_dets(cams, T, k, vis, rng, dims=(8.0, 2.5, 3.5), noise_px=1.0):
+    """Рамки — описанные прямоугольники проекции параллелепипеда, ориентированного по скорости."""
+    v = T[min(k + 1, len(T) - 1)] - T[max(k - 1, 0)]
+    f = np.array([v[0], v[1], 0.0])
+    f /= np.linalg.norm(f)
+    lft = np.array([-f[1], f[0], 0.0])
+    L, W, H = dims
+    sg = np.array([[a, b, c] for a in (-1, 1) for b in (-1, 1) for c in (-1, 1)], dtype=float) * 0.5
+    C = T[k] + sg[:, :1] * L * f + sg[:, 1:2] * W * lft + sg[:, 2:3] * H * np.array([0, 0, 1.0])
+    out = []
+    for ci, cam in enumerate(cams):
+        if not vis[ci]:
+            out.append([])
+            continue
+        uv = cam.project(C)
+        b = np.r_[uv.min(0), uv.max(0)] + rng.normal(0, noise_px, 4)
+        out.append([Detection(tuple(b), ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2), 0.8, "truck", "synth")])
+    return out, T[k] + f * L / 2
+
+
+def test_box_model_front_anchor_and_mono():
+    """Модель «параллелепипед»: размеры оцениваются, выход «перёд» точен; интервал одной камеры держится."""
+    n = 300
+    T = truth_traj(n)
+    center = world_to_ue(T.mean(0))
+    cams = [look_at_ue(loc, center, f) for loc, _, f in CAMS_UE]
+    rng = np.random.default_rng(1)
+    frames, fronts = [], []
+    for k in range(n):
+        vis = [True] * 5 if (k < 150 or k >= 230) else [False, True, False, False, False]
+        d, fr = box_dets(cams, T, k, vis, rng)
+        frames.append(d)
+        fronts.append(fr)
+    fronts = np.array(fronts)
+    E, tr = track_frames(cams, frames, TrackerConfig(fps=FPS, meas="box", anchor="front"))
+    err = np.linalg.norm(E - fronts, axis=1)
+    assert np.sqrt(np.mean(err[60:150] ** 2)) < 1.0, err[60:150].max()
+    assert np.nanmax(err[150:230]) < 6.0, np.nanmax(err[150:230])
+    L = tr.x[tr.nk]
+    assert abs(L - 8.0) < 1.0, tr.x[tr.nk:]
+
+
+# ---------------------------------------------------------------------------
+# Синтетика «дрон»: подъём, зависание, пролёт; реальные камеры тестового набора, частичная видимость
+# ---------------------------------------------------------------------------
+
+def drone_traj(n=750):
+    """Плавная 3D-траектория (мир, м) около камеры 5: подъём 0–150, зависание 150–300, пролёт 300–600,
+    торможение и зависание 600–750."""
+    p = np.zeros((n, 3))
+    x = np.array([-60.0, 30.0, 8.0])  # рабочая система: (X_ue, -Y_ue, Z_ue)/100
+    v = np.zeros(3)
+    for k in range(n):
+        t = k / FPS
+        if k < 150:
+            vt = np.array([0.0, 0.0, 2.0])
+        elif k < 300:
+            vt = np.array([0.2 * np.sin(t), 0.2 * np.cos(t), 0.0])
+        elif k < 600:
+            a = (k - 300) / 300 * np.pi / 2
+            vt = 12.0 * np.array([np.cos(a), -np.sin(a), 0.05])
+        else:
+            vt = np.zeros(3)
+        v += np.clip(vt - v, -4.0 / FPS, 4.0 / FPS)  # ускорение не больше 4 м/с²
+        x = x + v / FPS
+        p[k] = x
+    return p
+
+
+def drone_vis(k):
+    """Видимость по камерам (1..5): дрон много времени виден одной камерой, есть разрыв без камер."""
+    v = [False] * 5
+    if k < 566:
+        v[4] = True
+    if 200 <= k < 450:
+        v[0] = v[1] = True
+    if 400 <= k < 520:
+        v[2] = True
+    if 640 <= k:
+        v[2] = True
+    return v
+
+
+def run_drone(cfg, seed=0, size_m=0.5, noise_px=1.0):
+    T = drone_traj()
+    center = world_to_ue(T.mean(0))
+    cams = [look_at_ue(loc, center, f) for loc, _, f in CAMS_UE]
+    rng = np.random.default_rng(seed)
+    frames = []
+    for k in range(len(T)):
+        vis = drone_vis(k)
+        dl = []
+        for ci, cam in enumerate(cams):
+            d = []
+            if vis[ci]:
+                uv = cam.project(T[k])[0] + rng.normal(0, noise_px, 2)
+                s = max(2.0, cam.K[0, 0] * size_m / cam.depth(T[k])[0]) / 2
+                d.append(Detection((uv[0] - s, uv[1] - s, uv[0] + s, uv[1] + s), tuple(uv), 0.7, "drone", "synth"))
+            if rng.random() < 0.2:  # ложные срабатывания
+                u, w = rng.uniform(0, 1920), rng.uniform(0, 1080)
+                d.append(Detection((u - 5, w - 5, u + 5, w + 5), (u, w), 0.4, "drone", "synth"))
+            dl.append(d)
+        frames.append(dl)
+    E, tr = track_frames(cams, frames, cfg)
+    return T, E, tr
+
+
+def test_drone_synthetic():
+    """Дрон: ошибка мала там, где >= 2 камер; с априорным размером держится и по одной камере; все кадры с оценкой."""
+    cfg = TrackerConfig(fps=FPS, object_size_m=0.5)
+    T, E, tr = run_drone(cfg)
+    err = np.linalg.norm(E - T, axis=1)
+    modes = np.array([h.mode for h in tr.history])
+    ncam = np.array([h.n_cams for h in tr.history])
+    assert np.isfinite(E).all()  # трек создан с первого кадра (по одной камере и размеру)
+    assert np.sqrt(np.mean(err[(ncam >= 2) & (np.arange(len(T)) > 230)] ** 2)) < 1.0
+    assert np.median(err[100:200]) < 15.0  # одна камера, глубина по размеру (σ 50 %) + движение
+    assert (modes[566:640] == "predict").all()  # без камер — прогноз
+    assert np.max(err[566:640]) < 20.0
+    assert np.sqrt(np.mean(err[680:] ** 2)) < 15.0
+
+
+def test_static_single_camera_size_prior():
+    """Неподвижный объект виден одной камерой (как дрон на тестовых видео): луч + дальность по априорной ширине.
+    При верном размере ошибка мала, кадры помечены mono_size_prior; после пропадания — прогноз на месте."""
+    cam = ue_camera_model((9799.8, -3900.0, 1487.5), -7.0, -164.0, -4.4, 20.0)
+    X = cam.center + 11.0 * cam.R[2] + 2.0 * cam.R[0]  # 11 м перед камерой
+    rng = np.random.default_rng(3)
+    frames = []
+    for k in range(400):
+        d = []
+        if k < 300:
+            uv = cam.project(X)[0] + rng.normal(0, 0.5, 2)
+            w = cam.K[0, 0] * 0.5 / cam.depth(X)[0]
+            d.append(Detection((uv[0] - w / 2, uv[1] - w / 4, uv[0] + w / 2, uv[1] + w / 4), tuple(uv), 0.99, "drone", "synth"))
+        frames.append([d])
+    cfg = TrackerConfig(fps=FPS, object_size_m=0.5, size_dim="width", accel_std=1.0, point="detector")
+    E, tr = track_frames([cam], frames, cfg)
+    err = np.linalg.norm(E - X, axis=1)
+    modes = [h.mode for h in tr.history]
+    assert modes[100] == "mono_size_prior" and modes[350] == "predict"
+    assert np.median(err[50:300]) < 0.5 and err[399] < 3.0
