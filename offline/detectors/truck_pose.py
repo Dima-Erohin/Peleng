@@ -8,7 +8,39 @@ from __future__ import annotations
 
 import os
 
+import numpy as np
+
 from ..detect_base import Detection, Detector
+
+# 3D-модель грузовика в системе (вдоль курса x, влево y, вверх z) относительно pivot; порядок — как в truck_dataset
+# (idx=1+si*4+ti*2+zi). Размеры — те же, что в разметке (truck_dataset.FRONT/REAR/HALF_W/HEIGHT/Z_BOTTOM).
+_FRONT, _REAR, _HW, _H, _ZB = 0.3, 22.0, 1.4, 4.5, -1.7
+MODEL_PTS = np.array([[0, 0, 0]] + [[s, t, z] for s in (_FRONT, -_REAR) for t in (_HW, -_HW) for z in (_ZB, _ZB + _H)], np.float64)
+
+
+def pnp_pivot(kp: np.ndarray, camera_model, min_conf: float = 0.3):
+    """Поза по одной камере: kp (9,3) [x,y,conf] в пикселях -> (pivot в мировой системе (3,), курс-вектор (3,), ошибка репроекции px) или None.
+
+    Нужны ≥6 точек с conf ≥ min_conf (включая углы). Метрика/ошибки зависят от точности 3D-габаритов (они оценочные)."""
+    import cv2
+
+    ok = kp[:, 2] >= min_conf
+    if ok.sum() < 6:
+        return None
+    obj, img = MODEL_PTS[ok], kp[ok, :2].astype(np.float64)
+    K = camera_model.K
+    good, rvec, tvec, inl = cv2.solvePnPRansac(obj, img, K, camera_model.dist, flags=cv2.SOLVEPNP_EPNP, reprojectionError=12.0,
+                                               iterationsCount=200)
+    if not good:
+        return None
+    rvec, tvec = cv2.solvePnPRefineLM(obj, img, K, camera_model.dist, rvec, tvec)
+    proj, _ = cv2.projectPoints(obj, rvec, tvec, K, camera_model.dist)
+    err = float(np.median(np.linalg.norm(proj.reshape(-1, 2) - img, axis=1)))
+    Rm, _ = cv2.Rodrigues(rvec)
+    Xc = tvec.reshape(3)  # pivot в системе камеры
+    Xw = camera_model.R.T @ (Xc - camera_model.t)
+    fwd_w = camera_model.R.T @ (Rm @ np.array([1.0, 0, 0]))
+    return Xw, fwd_w, err
 
 
 class TruckPoseDetector(Detector):
@@ -43,6 +75,7 @@ class TruckPoseDetector(Detector):
                 px, py, kc = float(kp[i][0][0]), float(kp[i][0][1]), float(kp[i][0][2])
             else:
                 px, py, kc = c[0], c[1], 0.0
+            allkp = kp[i].tolist() if kp is not None and len(kp) > i else []  # [[x,y,conf]]*9: pivot + 8 углов
             out.append(Detection(tuple(b), (px, py), float(s), "truck", self.name,
-                                 {"pivot": (px, py), "kp_conf": kc, "box_center": c}))
+                                 {"pivot": (px, py), "kp_conf": kc, "box_center": c, "kp": allkp}))
         return out

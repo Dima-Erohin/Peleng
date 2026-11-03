@@ -73,7 +73,14 @@ def label_for(T, k, cam_model, size=(1920, 1080)):
     b = np.array([max(b[0], 0), max(b[1], 0), min(b[2], W), min(b[3], H)])
     if (b[2] - b[0]) < 12 or (b[3] - b[1]) < 6 or (b[2] - b[0]) * (b[3] - b[1]) < 0.4 * full:
         return None
-    return b, pv
+    kps = np.vstack([pv[None], P])  # 0 = pivot, 1..8 = углы параллелепипеда
+    return b, pv, kps
+
+
+# порядок углов (см. truck_corners): idx = 1 + si*4 + ti*2 + zi; si: 0 перед/1 зад, ti: 0 «+w»/1 «−w», zi: 0 низ/1 верх.
+# При отражении кадра по горизонтали боковые стороны меняются местами: ti 0<->1 (перед/зад и низ/верх сохраняются).
+FLIP_IDX = [0] + [1 + si * 4 + (1 - ti) * 2 + zi for si in (0, 1) for ti in (0, 1) for zi in (0, 1)]
+NKP = 9
 
 
 def make_foliage_library(frames, rng, n=60):
@@ -143,68 +150,44 @@ def photometric(img, rng):
     return out
 
 
-def write_sample(root, split, name, img, box, pv, size=(1920, 1080)):
+def label_line(box, kps, size=(1920, 1080)):
     W, H = size
+    cx, cy, w, h = (box[0] + box[2]) / 2 / W, (box[1] + box[3]) / 2 / H, (box[2] - box[0]) / W, (box[3] - box[1]) / H
+    parts = [f"0 {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}"]
+    for x, y in kps:
+        if 1 <= x <= W - 1 and 1 <= y <= H - 1:
+            parts.append(f"{x / W:.6f} {y / H:.6f} 2")
+        else:
+            parts.append("0 0 0")  # вне кадра — не размечена
+    return " ".join(parts) + "\n"
+
+
+def write_sample(root, split, name, img, box, kps, size=(1920, 1080)):
     (root / split / "images").mkdir(parents=True, exist_ok=True)
     (root / split / "labels").mkdir(parents=True, exist_ok=True)
     cv2.imwrite(str(root / split / "images" / f"{name}.jpg"), cv2.resize(img, (OUT_W, OUT_H), interpolation=cv2.INTER_AREA),
                 [cv2.IMWRITE_JPEG_QUALITY, 92])
-    cx, cy, w, h = (box[0] + box[2]) / 2 / W, (box[1] + box[3]) / 2 / H, (box[2] - box[0]) / W, (box[3] - box[1]) / H
-    (root / split / "labels" / f"{name}.txt").write_text(f"0 {cx:.6f} {cy:.6f} {w:.6f} {h:.6f} {pv[0] / W:.6f} {pv[1] / H:.6f} 2\n")
+    (root / split / "labels" / f"{name}.txt").write_text(label_line(box, kps, size))
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--data", required=True)
-    ap.add_argument("--out", required=True)
-    ap.add_argument("--stride", type=int, default=2)
-    ap.add_argument("--seed", type=int, default=0)
-    a = ap.parse_args()
-    rng = random.Random(a.seed)
-    ds = load_dataset(a.data)
-    T = ds.truth_world()
-    if T is None:
-        raise SystemExit("нет эталонной траектории грузовика в папке данных")
-    root = Path(a.out)
-    root.mkdir(parents=True, exist_ok=True)
-    bgs = {c.cam_id: BackgroundDetector() for c in ds.cameras}
-    vids = [c.video_path for c in ds.cameras]
-    lib_frames, lib = [], None
-    kept = {c.cam_id: [] for c in ds.cameras}
-    pending = []
-    for k, imgs in SyncVideoReader(vids, ds.n_frames):
-        for cam, im in zip(ds.cameras, imgs):
-            if im is None:
-                continue
-            blobs = bgs[cam.cam_id].detect(cam.cam_id, k, im, cam.model(k))  # каждый кадр: копит фон
-            if k % 97 == 5 and len(lib_frames) < 40:
-                lib_frames.append(im.copy())
-            if k % a.stride or k < 12:
-                continue
-            lab = label_for(T, k, cam.model(k), cam.size)
+def relabel(root, ds, T):
+    """Переписать метки (9 keypoints) для уже сохранённых картинок, не перечитывая видео."""
+    cams = {c.cam_id: c for c in ds.cameras}
+    n = 0
+    for split in ("clean", "aug"):
+        for f in sorted((root / split / "images").glob("*.jpg")):
+            cam_id, k = int(f.name[1]), int(f.name[4:8])
+            lab = label_for(T, k, cams[cam_id].model(k), cams[cam_id].size)
             if lab is None:
+                f.unlink()
+                (root / split / "labels" / f"{f.stem}.txt").unlink(missing_ok=True)
                 continue
-            box, pv = lab
-            hit = any(b.bbox[0] < box[2] and b.bbox[2] > box[0] and b.bbox[1] < box[3] and b.bbox[3] > box[1] for b in blobs)
-            if not hit:
-                continue
-            pending.append((cam.cam_id, k, im.copy(), box, pv))
-        if len(pending) >= 40 or (k == ds.n_frames - 1):
-            if lib is None and len(lib_frames) >= 12:
-                lib = make_foliage_library(lib_frames, rng)
-                print("кропов листвы:", len(lib))
-            for cam_id, kk, im, box, pv in pending:
-                name = f"c{cam_id}_f{kk:04d}"
-                write_sample(root, "clean", name, im, box, pv)
-                aug = im.copy()
-                if lib and rng.random() < 0.45:
-                    aug = add_occluders(aug, box, lib, rng, pv)
-                aug = photometric(aug, rng)
-                write_sample(root, "aug", name, aug, box, pv)
-                kept[cam_id].append(name)
-            pending = []
-        if k % 200 == 0:
-            print(k, {c: len(v) for c, v in kept.items()}, flush=True)
+            (root / split / "labels" / f"{f.stem}.txt").write_text(label_line(lab[0], lab[2], cams[cam_id].size))
+            n += 1
+    return n
+
+
+def write_lists(root, kept):
     lists = root / "lists"
     lists.mkdir(exist_ok=True)
 
@@ -222,7 +205,68 @@ def main():
         (lists / f"val{e}.txt").write_text("\n".join(paths("clean", va, every=(10 if e == "All" else 2))) + "\n")
         (root / f"data_{e}.yaml").write_text(
             f"path: {root.as_posix()}\ntrain: {(lists / f'train{e}.txt').as_posix()}\nval: {(lists / f'val{e}.txt').as_posix()}\n"
-            f"kpt_shape: [1, 3]\nflip_idx: [0]\nnames:\n  0: truck\n")
+            f"kpt_shape: [{NKP}, 3]\nflip_idx: {FLIP_IDX}\nnames:\n  0: truck\n")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--stride", type=int, default=2)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--relabel", action="store_true", help="только переписать метки для готовых картинок")
+    a = ap.parse_args()
+    rng = random.Random(a.seed)
+    ds = load_dataset(a.data)
+    T = ds.truth_world()
+    if T is None:
+        raise SystemExit("нет эталонной траектории грузовика в папке данных")
+    root = Path(a.out)
+    root.mkdir(parents=True, exist_ok=True)
+    if a.relabel:
+        print("переписано меток:", relabel(root, ds, T))
+        kept = {c.cam_id: sorted(p.stem for p in (root / "clean" / "images").glob(f"c{c.cam_id}_*.jpg")) for c in ds.cameras}
+        write_lists(root, kept)
+        return
+    bgs = {c.cam_id: BackgroundDetector() for c in ds.cameras}
+    vids = [c.video_path for c in ds.cameras]
+    lib_frames, lib = [], None
+    kept = {c.cam_id: [] for c in ds.cameras}
+    pending = []
+    for k, imgs in SyncVideoReader(vids, ds.n_frames):
+        for cam, im in zip(ds.cameras, imgs):
+            if im is None:
+                continue
+            blobs = bgs[cam.cam_id].detect(cam.cam_id, k, im, cam.model(k))  # каждый кадр: копит фон
+            if k % 97 == 5 and len(lib_frames) < 40:
+                lib_frames.append(im.copy())
+            if k % a.stride or k < 12:
+                continue
+            lab = label_for(T, k, cam.model(k), cam.size)
+            if lab is None:
+                continue
+            box, pv, kps = lab
+            hit = any(b.bbox[0] < box[2] and b.bbox[2] > box[0] and b.bbox[1] < box[3] and b.bbox[3] > box[1] for b in blobs)
+            if not hit:
+                continue
+            pending.append((cam.cam_id, k, im.copy(), box, pv, kps))
+        if len(pending) >= 40 or (k == ds.n_frames - 1):
+            if lib is None and len(lib_frames) >= 12:
+                lib = make_foliage_library(lib_frames, rng)
+                print("кропов листвы:", len(lib))
+            for cam_id, kk, im, box, pv, kps in pending:
+                name = f"c{cam_id}_f{kk:04d}"
+                write_sample(root, "clean", name, im, box, kps)
+                aug = im.copy()
+                if lib and rng.random() < 0.45:
+                    aug = add_occluders(aug, box, lib, rng, pv)
+                aug = photometric(aug, rng)
+                write_sample(root, "aug", name, aug, box, kps)
+                kept[cam_id].append(name)
+            pending = []
+        if k % 200 == 0:
+            print(k, {c: len(v) for c, v in kept.items()}, flush=True)
+    write_lists(root, kept)
     print("готово", {c: len(v) for c, v in kept.items()})
 
 

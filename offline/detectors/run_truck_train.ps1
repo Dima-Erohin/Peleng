@@ -24,7 +24,6 @@ if (-not (Test-Path $Py)) {
     & $Py -m pip install --upgrade pip
     & $Py -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
     & $Py -m pip install -r (Join-Path $PSScriptRoot "requirements_truck.txt")
-    & $Py -m pip install -r (Join-Path $Repo "backend\requirements.txt")
 }
 $Ds = Join-Path $Out "truck_ds"
 if (-not (Test-Path (Join-Path $Ds "data_All.yaml"))) {
