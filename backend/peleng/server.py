@@ -120,30 +120,32 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
             detector_box["status"] = f"ошибка: {e}"
             print(f"[pose] YOLO недоступен ({e}). Калибровка работает, детекции людей не будет.")
 
-    app = FastAPI(title="Peleng")
-    app.state.registry = registry
-    app.state.pipeline = pipeline
-    app.state.hub = hub
-    app.state.board = board
-
-    @app.on_event("startup")
-    async def _startup():
+    @contextlib.asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        # запуск
         hub.loop = asyncio.get_running_loop()
         for src in registry.sources.values():
             src.start()
         if replay:
             threading.Thread(target=_replay_loop, args=(replay,), daemon=True).start()
-            return
-        if not demo:
-            threading.Thread(target=load_detector, daemon=True).start()
-        pipeline.start()
+        else:
+            if not demo:
+                threading.Thread(target=load_detector, daemon=True).start()
+            pipeline.start()
+        try:
+            yield
+        finally:
+            # остановка
+            hub.loop = None
+            pipeline.stop()
+            for src in registry.sources.values():
+                src.stop()
 
-    @app.on_event("shutdown")
-    async def _shutdown():
-        hub.loop = None
-        pipeline.stop()
-        for src in registry.sources.values():
-            src.stop()
+    app = FastAPI(title="Peleng", lifespan=lifespan)
+    app.state.registry = registry
+    app.state.pipeline = pipeline
+    app.state.hub = hub
+    app.state.board = board
 
     def _replay_loop(path: str):
         lines = Path(path).read_text(encoding="utf-8").splitlines()

@@ -18,7 +18,9 @@ backend/
 data/                 (не в git) калибровки, сертификат, записи сессий
 ```
 
-## Установка (Windows / macOS / Linux, Python 3.10–3.12)
+## Установка (Windows / macOS / Linux)
+
+Рекомендуется **Python 3.12** (3.10–3.13 тоже работают). На 3.14 torch/ultralytics пока выдают предупреждения — для хакатона лучше 3.12.
 
 ```bash
 cd backend
