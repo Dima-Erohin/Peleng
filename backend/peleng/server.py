@@ -172,11 +172,11 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
 
     @app.get("/")
     async def index():
-        return FileResponse(WEB_DIR / "index.html")
+        return FileResponse(WEB_DIR / "build" / "index.html")
 
     @app.get("/cam")
     async def cam_page():
-        return FileResponse(WEB_DIR / "cam.html")
+        return FileResponse(WEB_DIR / "build" / "cam.html")
 
     # ------------------------------------------------------------------ WebSocket
     @app.websocket("/ws/stream")

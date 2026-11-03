@@ -33,6 +33,14 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+Для сборки интерфейса на React нужен Node.js 18 или новее:
+```bash
+cd ../frontend
+npm ci
+npm run build
+cd ../backend
+```
+
 Проверка, что всё встало (должно быть `… passed`):
 ```bash
 python -m pytest -q tests
@@ -74,6 +82,8 @@ cp config.example.json config.json        # macOS / Linux
 ## 3. Запуск
 
 Все команды — из `backend/` с активированным окружением.
+
+После изменения интерфейса пересоберите frontend из `frontend/`: `cd ../frontend && npm run build`.
 
 | Команда | Когда |
 |---|---|

@@ -1,80 +1,9 @@
-<!doctype html>
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Peleng</title>
-<style>
-  :root { color-scheme: dark; --bg: #0e1116; --panel: #161b22; --line: #2a313c; --text: #e6edf3; --muted: #8b949e; --acc: #2ea043; --warn: #d29922; --bad: #f85149; }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, sans-serif; height: 100vh; display: grid; grid-template-columns: 1fr 360px; grid-template-rows: 1fr auto; }
-  #view { position: relative; grid-row: 1; grid-column: 1; min-height: 0; }
-  #view canvas { display: block; width: 100%; height: 100%; }
-  #hud { position: absolute; left: 10px; top: 8px; font: 12px ui-monospace, monospace; color: var(--muted); pointer-events: none; white-space: pre; }
-  #measure { position: absolute; right: 10px; top: 8px; font: 13px ui-monospace, monospace; background: rgba(0,0,0,.5); padding: 4px 8px; border-radius: 6px; display: none; }
-  aside { grid-row: 1 / span 2; grid-column: 2; background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto; padding: 12px; }
-  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 16px 0 8px; }
-  h2:first-child { margin-top: 0; }
-  button { font: inherit; padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: #21262d; color: var(--text); cursor: pointer; }
-  button:hover { border-color: #8b949e; }
-  button.primary { background: var(--acc); border-color: var(--acc); color: #fff; }
-  button.rec { background: var(--bad); border-color: var(--bad); color: #fff; }
-  .btns { display: flex; flex-wrap: wrap; gap: 6px; }
-  .cam { border: 1px solid var(--line); border-radius: 8px; padding: 8px; margin-bottom: 8px; }
-  .cam .top { display: flex; justify-content: space-between; align-items: center; gap: 6px; }
-  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--bad); margin-right: 6px; }
-  .dot.on { background: var(--acc); }
-  .small { font-size: 12px; color: var(--muted); }
-  .ok { color: var(--acc); } .warn { color: var(--warn); } .bad { color: var(--bad); }
-  input[type=number] { width: 64px; font: inherit; background: #0d1117; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 4px; }
-  #log { font: 12px ui-monospace, monospace; white-space: pre-wrap; color: var(--muted); max-height: 220px; overflow-y: auto; background: #0d1117; border-radius: 6px; padding: 6px; }
-  #previews { grid-row: 2; grid-column: 1; display: flex; gap: 6px; padding: 6px; overflow-x: auto; background: #0b0d11; border-top: 1px solid var(--line); }
-  #previews figure { margin: 0; position: relative; flex: 0 0 auto; }
-  #previews img { height: 180px; display: block; border-radius: 6px; background: #000; }
-  #previews figcaption { position: absolute; left: 6px; top: 4px; font-size: 12px; background: rgba(0,0,0,.6); padding: 1px 6px; border-radius: 4px; }
-  label.chk { display: flex; gap: 6px; align-items: center; margin: 4px 0; }
-  @media (max-width: 800px) { body { grid-template-columns: 1fr; grid-template-rows: 55vh auto auto; } aside { grid-row: 3; grid-column: 1; border-left: 0; } #previews img { height: 120px; } }
-</style>
-<script type="importmap">
-{ "imports": { "three": "/static/vendor/three.module.min.js" } }
-</script>
-</head>
-<body>
-<div id="view"><div id="hud">подключение…</div><div id="measure"></div></div>
-<div id="previews"></div>
-<aside>
-  <h2>Калибровка</h2>
-  <div class="btns">
-    <button class="primary" id="btnExtr" title="Доска должна лежать на полу и быть видна всем камерам">Калибровать положение по доске</button>
-    <a href="/api/board.png" target="_blank"><button>Доска (PNG)</button></a>
-  </div>
-  <label class="chk"><input type="checkbox" id="chkBoard"> показывать найденную доску на превью</label>
-  <h2>Камеры</h2>
-  <div id="cams"></div>
-  <div class="small">Телефон: открой на нём <b id="camUrl"></b></div>
-  <h2>Сцена</h2>
-  <div class="btns">
-    <button id="btnScan" title="Облако точек по особым точкам кадров (нужно ≥ 2 откалиброванных камер)">Комната точками</button>
-    <button id="btnClearPts">Убрать точки</button>
-    <button id="btnTrails">Сбросить траектории</button>
-    <button id="btnMark" title="Клавиша M: запомнить текущее положение человека и показывать расстояние от него">Отметка (M)</button>
-  </div>
-  <label class="chk"><input type="checkbox" id="chkTex" checked> кадры камер в 3D</label>
-  <label class="chk"><input type="checkbox" id="chkSkel" checked> скелеты</label>
-  <h2>Запись</h2>
-  <div class="btns"><button id="btnRec">● Записать сессию</button></div>
-  <div id="ext"></div>
-  <h2>Журнал</h2>
-  <div id="log"></div>
-</aside>
-
-<script type="module">
-import * as THREE from "three";
+import * as THREE from "/static/vendor/three.module.min.js";
 import { OrbitControls } from "/static/vendor/OrbitControls.js";
 
 const $ = (id) => document.getElementById(id);
-const log = (s) => { const el = $("log"); el.textContent = `[${new Date().toLocaleTimeString()}] ${s}\n` + el.textContent; };
-$("camUrl").textContent = `${location.origin}/cam`;
+const log = (s) => window.dispatchEvent(new CustomEvent("peleng:log", { detail: s }));
+const publish = (name, detail) => window.dispatchEvent(new CustomEvent(`peleng:${name}`, { detail }));
 
 // ---------------------------------------------------------------- сцена (Z вверх)
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
@@ -99,10 +28,14 @@ scene.add(new THREE.AxesHelper(0.5));
 
 function resize() {
   const w = view.clientWidth, h = view.clientHeight;
+  if (!w || !h) return;
   renderer.setSize(w, h, false);
   camera.aspect = w / Math.max(h, 1); camera.updateProjectionMatrix();
 }
 new ResizeObserver(resize).observe(view);
+window.addEventListener("resize", resize);
+requestAnimationFrame(resize);
+window.setTimeout(resize, 100);
 
 const COLORS = [0xff6b6b, 0x4dabf7, 0x51cf66, 0xfcc419, 0xcc5de8, 0x22b8cf, 0xff922b, 0xf06595];
 const colorFor = (id) => COLORS[(id - 1) % COLORS.length];
@@ -150,6 +83,8 @@ function drawRoom(room) {
 const camGroup = new THREE.Group(); scene.add(camGroup);
 const camObjs = {};   // id -> {group, plane, tex}
 let cameras = [];
+let showTextures = true;
+let showSkeletons = true;
 function drawCameras(list) {
   cameras = list;
   for (const id of Object.keys(camObjs)) { camGroup.remove(camObjs[id].group); delete camObjs[id]; }
@@ -188,7 +123,7 @@ function drawCameras(list) {
 }
 const texLoader = new THREE.TextureLoader();
 setInterval(() => {
-  if (!$("chkTex").checked) return;
+  if (!showTextures) return;
   for (const [id, o] of Object.entries(camObjs)) {
     texLoader.load(`/api/cameras/${encodeURIComponent(id)}/snapshot.jpg?overlay=0&width=320&_=${Date.now()}`, (tex) => {
       tex.colorSpace = THREE.SRGBColorSpace;
@@ -243,7 +178,7 @@ function updatePeople(list) {
     o.last = now;
     o.group.visible = true;
     const opacity = p.predicted ? 0.35 : 1;
-    const hasSkel = $("chkSkel").checked && p.kp3d && p.kp3d.filter(Boolean).length >= 4;
+    const hasSkel = showSkeletons && p.kp3d && p.kp3d.filter(Boolean).length >= 4;
     o.joints.forEach((s, i) => { const k = hasSkel && p.kp3d[i]; s.visible = !!k; if (k) s.position.set(...k); });
     o.mat.opacity = opacity;
     o.bones.visible = !!hasSkel;
@@ -277,10 +212,9 @@ function updatePeople(list) {
   }
   for (const o of Object.values(people)) if (now - o.last > 500) o.group.visible = false;
 }
-$("btnTrails").onclick = () => {
+function clearTrails() {
   for (const o of Object.values(people)) { o.trailPts = []; o.trail.geometry.setDrawRange(0, 0); }
-  fetch("/api/tracks/reset", { method: "POST" });
-};
+}
 
 // ---------------------------------------------------------------- отметка и замер расстояния
 let mark = null, lastPersons = [];
@@ -291,92 +225,10 @@ function setMark() {
   if (!p) { log("нет человека для отметки"); return; }
   mark = { id: p.id, pos: p.floor.slice() };
   markMesh.position.set(mark.pos[0], mark.pos[1], 0.01); markMesh.visible = true;
-  $("measure").style.display = "block";
+  publish("measure", { visible: true, text: `Отметка ID ${p.id} · ${p.floor.map(v => v.toFixed(2)).join(", ")} м` });
   log(`отметка: ID ${p.id} в (${p.floor.map(v => v.toFixed(2)).join(", ")})`);
 }
-$("btnMark").onclick = setMark;
 addEventListener("keydown", (e) => { if (e.key === "m" || e.key === "M" || e.key === "ь" || e.key === "Ь") setMark(); });
-
-// ---------------------------------------------------------------- панель камер и превью
-function renderCams() {
-  const box = $("cams"); box.innerHTML = "";
-  const prev = $("previews");
-  const existing = new Set([...prev.children].map(f => f.dataset.id));
-  for (const c of cameras) {
-    const div = document.createElement("div"); div.className = "cam";
-    const calib = c.calibrated
-      ? `<span class="ok">положение ✓</span> ${c.extrinsics_reproj_px != null ? `(${c.extrinsics_reproj_px} px)` : ""}`
-      : `<span class="warn">положение не задано</span>`;
-    const intr = c.intrinsics === "board" ? `<span class="ok">оптика ✓</span>` : c.intrinsics === "approx+focal" ? `<span class="warn">оптика ≈ (фокус уточнён)</span>` : `<span class="warn">оптика ≈</span>`;
-    div.innerHTML = `
-      <div class="top"><b><span class="dot ${c.online ? "on" : ""}"></span>${c.name || c.id}</b><span class="small">${c.kind} · ${c.fps} к/с ${c.size ? "· " + c.size.join("×") : ""}</span></div>
-      <div class="small">${calib} · ${intr} ${c.hfov_deg ? "· обзор " + c.hfov_deg + "°" : ""} ${c.center ? "<br>в мире: (" + c.center.map(v => v.toFixed(2)).join(", ") + ")" : ""}</div>
-      <div class="btns" style="margin-top:6px">
-        <button data-act="intr">Оптика: 15 кадров</button>
-        <button data-act="reset">Сброс</button>
-        <label class="small">обзор° <input type="number" step="1" min="30" max="120" value="${c.hfov_deg || 68}" data-act="hfov"></label>
-      </div>
-      <div class="small" data-role="job"></div>`;
-    div.querySelector('[data-act="intr"]').onclick = () => startIntrinsics(c.id, div.querySelector('[data-role="job"]'));
-    div.querySelector('[data-act="reset"]').onclick = async () => { await post(`/api/calib/${c.id}/reset`, { keep_intrinsics: true }); log(`${c.id}: положение сброшено`); };
-    div.querySelector('[data-act="hfov"]').onchange = async (e) => { await post(`/api/calib/${c.id}/hfov`, { hfov_deg: Number(e.target.value) }); log(`${c.id}: угол обзора ${e.target.value}°`); };
-    box.appendChild(div);
-    if (!existing.has(c.id)) {
-      const f = document.createElement("figure"); f.dataset.id = c.id;
-      f.innerHTML = `<img alt=""><figcaption>${c.name || c.id}</figcaption>`;
-      prev.appendChild(f);
-    }
-    existing.delete(c.id);
-  }
-  for (const id of existing) prev.querySelector(`[data-id="${CSS.escape(id)}"]`)?.remove();
-  refreshPreviews();
-}
-function refreshPreviews() {
-  const b = $("chkBoard").checked ? 1 : 0;
-  for (const f of $("previews").children) {
-    const img = f.querySelector("img");
-    const url = `/api/cameras/${encodeURIComponent(f.dataset.id)}/mjpeg?board_overlay=${b}&width=480`;
-    if (img.dataset.url !== url) { img.dataset.url = url; img.src = url; }
-  }
-}
-$("chkBoard").onchange = refreshPreviews;
-
-async function post(url, body) {
-  const r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
-  return r.json();
-}
-async function startIntrinsics(id, el) {
-  await post(`/api/calib/${id}/intrinsics/start`, { n: 15 });
-  log(`${id}: калибровка оптики — медленно показывайте доску камере под разными углами, близко, по всему кадру`);
-  const poll = setInterval(async () => {
-    const j = await (await fetch(`/api/calib/${id}/intrinsics`)).json();
-    el.textContent = j.state === "collecting" ? `сбор кадров: ${j.n}/${j.need}` : j.state === "done" ? `готово: ошибка ${j.rms} px, обзор ${j.hfov_deg}°` : `${j.state} ${j.message || ""}`;
-    if (j.state !== "collecting") { clearInterval(poll); log(`${id}: оптика — ${el.textContent}`); }
-  }, 500);
-}
-
-$("btnExtr").onclick = async () => {
-  log("калибровка положения… (доска на полу, ~1 с)");
-  const r = await post("/api/calib/extrinsics");
-  for (const [id, x] of Object.entries(r.cameras || {})) {
-    log(x.ok ? `${id}: ✓ ошибка ${x.reproj_px} px, до доски ${x.dist_to_origin_m} м, обзор ${x.hfov_deg}°${x.focal_refined ? " (фокус уточнён)" : ""}` : `${id}: ✗ ${x.message}`);
-  }
-  if (r.message) log(r.message);
-};
-$("btnScan").onclick = async () => {
-  log("сканирую комнату…");
-  const r = await post("/api/room/scan");
-  log(`точек: ${r.points}. ${r.message}. ` + (r.pairs || []).map(p => `${p.a}–${p.b}: ${p.points}`).join(", "));
-};
-$("btnClearPts").onclick = () => post("/api/room/clear");
-let recording = false;
-$("btnRec").onclick = async () => {
-  const r = await post(recording ? "/api/record/stop" : "/api/record/start");
-  recording = !recording;
-  $("btnRec").textContent = recording ? "■ Остановить запись" : "● Записать сессию";
-  $("btnRec").classList.toggle("rec", recording);
-  log((recording ? "запись: " : "сохранено: ") + r.file);
-};
 
 // ---------------------------------------------------------------- WebSocket
 let hudInfo = { mode: "", detector: "" }, frames = 0, fpsView = 0;
@@ -386,13 +238,13 @@ function connect() {
   ws.onmessage = (ev) => {
     const m = JSON.parse(ev.data);
     for (const fn of peleng.hooks[m.type] || []) { try { fn(m); } catch (e) { console.error(e); } }
+    publish("message", m);
     if (m.type === "hello") {
       hudInfo = { mode: m.mode, detector: m.detector };
-      drawBoard(m.board); drawRoom(m.room); drawCameras(m.cameras); renderCams();
-      if (m.recording) { recording = true; $("btnRec").textContent = "■ Остановить запись"; $("btnRec").classList.add("rec"); }
+      drawBoard(m.board); drawRoom(m.room); drawCameras(m.cameras);
       log(`подключено: режим ${m.mode}, детектор ${m.detector}`);
     } else if (m.type === "cameras") {
-      drawCameras(m.cameras); renderCams();
+      drawCameras(m.cameras);
     } else if (m.type === "room_points") {
       drawRoomPoints(m);
     } else if (m.type === "frame") {
@@ -400,28 +252,27 @@ function connect() {
       lastPersons = m.persons;
       updatePeople(m.persons);
       const s = m.stats || {};
-      $("hud").textContent =
+      publish("hud",
         `режим: ${hudInfo.mode}  детектор: ${hudInfo.detector}\n` +
         `обработка: ${s.fps ?? "–"} к/с  задержка: ${s.latency_ms} мс  рассинхрон: ${s.skew_ms} мс  YOLO: ${s.detect_ms} мс\n` +
         `камеры в 3D: ${(s.cams_used || []).join(", ") || "нет (нужна калибровка)"}\n` +
-        m.persons.map(p => `ID ${p.id}: (${p.pos.map(v => v.toFixed(2)).join(", ")}) ${p.mode}${p.reproj_err_px != null ? " ±" + p.reproj_err_px + "px" : ""} [${p.cams.join(",")}]`).join("\n");
+        m.persons.map(p => `ID ${p.id}: (${p.pos.map(v => v.toFixed(2)).join(", ")}) ${p.mode}${p.reproj_err_px != null ? " ±" + p.reproj_err_px + "px" : ""} [${p.cams.join(",")}]`).join("\n"));
       if (mark) {
         const p = m.persons.find(q => q.id === mark.id) || m.persons[0];
-        if (p) $("measure").textContent = `от отметки: ${Math.hypot(p.floor[0] - mark.pos[0], p.floor[1] - mark.pos[1]).toFixed(2)} м (ID ${p.id})`;
+        if (p) publish("measure", { visible: true, text: `От отметки: ${Math.hypot(p.floor[0] - mark.pos[0], p.floor[1] - mark.pos[1]).toFixed(2)} м · ID ${p.id}` });
       }
     }
   };
-  ws.onclose = () => { $("hud").textContent = "нет связи с сервером, переподключение…"; setTimeout(connect, 1000); };
+  ws.onclose = () => { publish("status", "Нет связи с сервером · переподключение…"); setTimeout(connect, 1000); };
 }
 connect();
 setInterval(async () => {  // обновлять fps/онлайн камер
-  try { const s = await (await fetch("/api/state")).json(); cameras = s.cameras; renderCamsLight(s.cameras); } catch (e) {}
+  try {
+    const s = await (await fetch("/api/state")).json();
+    cameras = s.cameras;
+    publish("cameras", s.cameras);
+  } catch (e) { /* retry on next interval */ }
 }, 2000);
-function renderCamsLight(list) {
-  // перерисовываем список, только если поменялся состав камер или их статус
-  const sig = list.map(c => `${c.id}:${c.online}:${c.calibrated}:${c.intrinsics}:${c.fps}`).join("|");
-  if (sig !== renderCamsLight.sig) { renderCamsLight.sig = sig; if (!document.activeElement || document.activeElement.tagName !== "INPUT") renderCams(); }
-}
 
 renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
 
@@ -433,6 +284,11 @@ renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, came
 window.peleng = {
   THREE, scene, camera, controls, log, colorFor, textSprite,
   hooks: {},
+  clearTrails,
+  clearRoomPoints() { drawRoomPoints({ points: [] }); },
+  setShowSkeletons(value) { showSkeletons = value; },
+  setShowTextures(value) { showTextures = value; },
+  setMark,
   addSection(title) {
     const box = document.createElement("div");
     box.innerHTML = `<h2></h2>`;
@@ -447,6 +303,3 @@ fetch("/api/ext").then(r => r.json()).then(async (files) => {
     try { await import(`/static/ext/${f}`); } catch (e) { log(`расширение ${f}: ${e.message}`); }
   }
 });
-</script>
-</body>
-</html>
