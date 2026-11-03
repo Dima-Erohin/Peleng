@@ -26,14 +26,22 @@ def main():
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--time", type=float, default=None, help="лимит времени, часы")
+    ap.add_argument("--fraction", type=float, default=1.0, help="доля train (для пробных запусков)")
     ap.add_argument("--out", default="runs")
-    ap.add_argument("--resume", action="store_true")
     a = ap.parse_args()
+    from pathlib import Path
+
     from ultralytics import YOLO
 
+    last = Path(a.out) / a.name / "weights" / "last.pt"
+    if last.exists():  # обрыв/перезапуск: продолжаем с последней эпохи (last.pt пишется каждую эпоху)
+        print("найден чекпойнт, продолжаю:", last)
+        YOLO(str(last)).train(resume=True)
+        print("веса:", f"{a.out}/{a.name}/weights/best.pt")
+        return
     m = YOLO(a.weights)
-    m.train(data=a.data, epochs=a.epochs, imgsz=a.imgsz, batch=a.batch, device=a.device, workers=a.workers, time=a.time,
-            project=a.out, name=a.name, exist_ok=True, patience=100, plots=False, resume=a.resume,
+    m.train(data=a.data, epochs=a.epochs, imgsz=a.imgsz, batch=a.batch, device=a.device, workers=a.workers, time=a.time, fraction=a.fraction,
+            project=str(Path(a.out).resolve()), name=a.name, exist_ok=True, patience=100, plots=False, save_period=-1,
             scale=0.7, degrees=10.0, translate=0.2, shear=3.0, perspective=0.0008, fliplr=0.5, flipud=0.0,
             mosaic=1.0, close_mosaic=3, mixup=0.1, hsv_h=0.02, hsv_s=0.6, hsv_v=0.4, pose=24.0, kobj=2.0, box=7.5)
     print("веса:", f"{a.out}/{a.name}/weights/best.pt")

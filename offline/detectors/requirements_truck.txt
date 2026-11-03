@@ -1,0 +1,7 @@
+# Python 3.12 (Windows/Linux/macOS). CPU-версия torch ставится отдельной командой (см. README):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+ultralytics>=8.3,<9
+opencv-python-headless
+numpy
+scipy
+pandas
