@@ -13,6 +13,8 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+frontend/node_modules/
+backend/web/build/
 
 # IDE / ОС
 .vscode/

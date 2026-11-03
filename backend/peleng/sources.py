@@ -2,10 +2,10 @@
 
 * OpenCVSource — вебкамера ноутбука (индекс 0/1/…) или URL потока (IP Webcam, DroidCam: http://IP:PORT/video).
 * PushSource — телефон открыл страницу /cam в браузере и шлёт JPEG по WebSocket (ничего не надо ставить).
-  Кадры снимаются по команде сервера («capture»), см. Pipeline.request_frames и web/cam.html.
+  Кадры снимаются по команде сервера («capture»), см. Pipeline.request_frames и frontend/src/camera.jsx.
 
 Время кадра — в часах сервера (time.time()). Телефон сам пересчитывает своё время в серверное
-по пингам (см. web/cam.html), так что задержка сети не влияет на синхронизацию.
+по пингам (см. frontend/src/camera.jsx), так что задержка сети не влияет на синхронизацию.
 """
 from __future__ import annotations
 
