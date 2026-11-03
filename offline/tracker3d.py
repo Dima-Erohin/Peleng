@@ -71,6 +71,12 @@ class TrackerConfig:
     size_rel_min: float = 0.04  # σ дальности по выученному размеру сразу после обучения (доля дальности)
     size_rel_growth: float | None = None  # рост σ в секунду с последнего обучения (None — постоянная size_range_rel_std)
     iekf_iters: int = 5
+    # прогноз по дуге (поворот скорости с оценённой угловой скоростью) — для участков без камер на поворотах
+    turn_predict: bool = False
+    turn_alpha: float = 0.05
+    turn_tau_s: float = 3.0
+    turn_max: float = 0.5  # рад/с
+    turn_min_speed: float = 3.0
     max_speed: float = 60.0  # м/с — физическое ограничение скорости (защита от расхождения фильтра)
     # модель измерения: "point" — точка рамки (центр), "box" — все 4 стороны рамки как проекция 3D-параллелепипеда
     # (центр p, курс по скорости, размеры L/W/H — в состоянии фильтра, оцениваются по ходу). Модель «box» даёт
@@ -342,6 +348,8 @@ class Tracker3D:
         self.heading = np.zeros(3)
         self._learn_dims = False
         self._reacq = None
+        self.omega = 0.0
+        self._prev_v = None
         self.front_samples: list = []
         self.size_learn_frame: dict[int, int] = {}
         self.dims_est = DimsEstimator(self.cfg.box_prior, self.cfg.dims_prior_std, mode=self.cfg.dims_mode) if (not self.box and self.cfg.anchor != "center") else None
@@ -382,8 +390,30 @@ class Tracker3D:
 
     def predict(self, dt: float) -> None:
         F, Q = self._FQ(dt)
+        c = self.cfg
+        if c.turn_predict and abs(self.omega) > 1e-4:
+            # «прогноз вдоль дуги»: горизонтальная скорость поворачивается с угловой скоростью ω, оценённой по
+            # прошлым кадрам (как едет машина по дороге с поворотом); без измерений ω затухает за turn_tau_s
+            since = (self.frame - self.last_update_frame) / c.fps
+            w = self.omega * (math.exp(-since / c.turn_tau_s) if since > 0.2 else 1.0)
+            a = w * dt
+            ca, sa = math.cos(a), math.sin(a)
+            Rz = np.eye(self.nx)
+            Rz[3:5, 3:5] = [[ca, -sa], [sa, ca]]
+            F = Rz @ F
         self.x = F @ self.x
         self.P = F @ self.P @ F.T + Q
+
+    def _update_omega(self) -> None:
+        """Угловая скорость курса по последовательным апостериорным скоростям (только при движении, причинно)."""
+        v = self.x[3:5]
+        sp = float(np.linalg.norm(v))
+        if self._prev_v is not None and sp > self.cfg.turn_min_speed and np.linalg.norm(self._prev_v) > self.cfg.turn_min_speed:
+            d = math.atan2(self._prev_v[0] * v[1] - self._prev_v[1] * v[0], float(self._prev_v @ v))
+            w = d * self.cfg.fps
+            w = max(-self.cfg.turn_max, min(self.cfg.turn_max, w))
+            self.omega = (1 - self.cfg.turn_alpha) * self.omega + self.cfg.turn_alpha * w
+        self._prev_v = v.copy()
 
     def _init(self, X: np.ndarray, cov: np.ndarray, frame: int, dims=None) -> None:
         c = self.cfg
@@ -816,6 +846,8 @@ class Tracker3D:
                         info["reinit"] = info["mono_init"] = True
                         self._reacq = None
 
+        if self.x is not None and mode in ("tri", "mono", "mono_size_prior"):
+            self._update_omega()
         res = self._result(frame, mode, used, reproj, info)
         self.history.append(res)
         return res
