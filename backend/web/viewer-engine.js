@@ -123,7 +123,7 @@ function drawCameras(list) {
 }
 const texLoader = new THREE.TextureLoader();
 setInterval(() => {
-  if (!showTextures) return;
+  if (!showTextures || document.hidden || !view.clientWidth || !view.clientHeight) return;
   for (const [id, o] of Object.entries(camObjs)) {
     texLoader.load(`/api/cameras/${encodeURIComponent(id)}/snapshot.jpg?overlay=0&width=320&_=${Date.now()}`, (tex) => {
       tex.colorSpace = THREE.SRGBColorSpace;
@@ -274,7 +274,10 @@ setInterval(async () => {  // обновлять fps/онлайн камер
   } catch (e) { /* retry on next interval */ }
 }, 2000);
 
-renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+renderer.setAnimationLoop(() => {
+  if (document.hidden || !view.clientWidth || !view.clientHeight) return;
+  controls.update(); renderer.render(scene, camera);
+});
 
 // ---------------------------------------------------------------- расширения (web/ext/*.js)
 // Скрипт расширения — ES-модуль; берёт всё нужное из window.peleng:

@@ -22,7 +22,7 @@ async function post(url, body = {}) {
   return data;
 }
 
-export default function Viewer() {
+export default function Viewer({ navigation }) {
   const [cameras, setCameras] = useState([]);
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState("Подключаемся к серверу…");
@@ -198,7 +198,7 @@ export default function Viewer() {
 
   return (
     <main className="app-shell">
-      <BrandHeader connected={connected} status={status} mode={mode} detector={detector} />
+      <BrandHeader connected={connected} status={status} mode={mode} detector={detector}>{navigation}</BrandHeader>
 
       <div className="workspace">
         <section className="visual-area">

@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "encoding": "UTF-8",
+  "originalsPreserved": true,
+  "files": [
+    {
+      "name": "object_transform_SM_AA_track.csv",
+      "originalSha256": "20cae9e7227652c3a4b31a723018255487df260db2123f5c34013683d70746ca",
+      "cleanSha256": "81531af7e47eab2c4e33893a02203f5dea677668a1996bfc1db09232d332f2f3",
+      "frameCount": 1002,
+      "repairs": [
+        {
+          "frame": 402,
+          "column": "Loc_X",
+          "original": "авг.13",
+          "estimated": 8.80835,
+          "method": "linear interpolation",
+          "units": "cm",
+          "neighbors": [
+            {
+              "frame": 401,
+              "value": -34.3729
+            },
+            {
+              "frame": 403,
+              "value": 51.9896
+            }
+          ]
+        },
+        {
+          "frame": 691,
+          "column": "Loc_Y",
+          "original": "июл.25",
+          "estimated": 7.87305,
+          "method": "linear interpolation",
+          "units": "cm",
+          "neighbors": [
+            {
+              "frame": 690,
+              "value": -9.615
+            },
+            {
+              "frame": 692,
+              "value": 25.3611
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "object_transform_CineCameraActor1.csv",
+      "originalSha256": "17becf3be3148fefc65acc96adf234039a7ac130ceedf3fc0a183de1685cff66",
+      "cleanSha256": "c03f7a235718dbfdc95122751389752d75ada012955f53034ee1f99e187371e9",
+      "frameCount": 1002,
+      "repairs": []
+    },
+    {
+      "name": "object_transform_CineCameraActor2.csv",
+      "originalSha256": "4c44e5d92019439e42b0a64e6f7baf5c71daaed53545ad5995a31e595375bf3d",
+      "cleanSha256": "d2f0e3fefc89d0944965e94fa9d0219238cb80d32435dfe9bc684e02a121eddc",
+      "frameCount": 1002,
+      "repairs": []
+    },
+    {
+      "name": "object_transform_CineCameraActor3.csv",
+      "originalSha256": "7580a5a2c351c02b0eecc232dc20420f3b4d0d983f328bbc26ba20771dbecffb",
+      "cleanSha256": "d4fdd7daef5e570460dd440bd51f2b06c7b5a605732765b906d7fb9befbcc740",
+      "frameCount": 1002,
+      "repairs": []
+    },
+    {
+      "name": "object_transform_CineCameraActor4.csv",
+      "originalSha256": "71157d386d1015ada979b27fbc005f17984846552f5dea59b39aeb80dde11749",
+      "cleanSha256": "2c88d67d0796e69322a8af99448e9af28cd9a9b88797b5c100366b398b29228d",
+      "frameCount": 1002,
+      "repairs": []
+    },
+    {
+      "name": "object_transform_CineCameraActor5.csv",
+      "originalSha256": "5f0ead2f5c98375a37704bd19b5a8e3789536652c5396d02afe46c1583023462",
+      "cleanSha256": "bb861f337487f119cc63a9b5a0455a6a24037dc3cf8bd6580b7aa4e3c06b7caf",
+      "frameCount": 1002,
+      "repairs": []
+    }
+  ]
+}

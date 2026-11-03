@@ -6,6 +6,7 @@
 * [docs/MVP.md](docs/MVP.md) — что умеет MVP, как ставить камеры и калибровать, планы
 * [docs/data-format.md](docs/data-format.md) — формат WebSocket/REST для фронтенда
 * [docs/CONTEXT.md](docs/CONTEXT.md) — контекст проекта и принятые решения
+* [docs/trajectory-playback.md](docs/trajectory-playback.md) — 3D-модель грузовика, воспроизведение CSV/SVG, материалы Project 02 и контракт для бэкенда
 
 ```
 backend/
