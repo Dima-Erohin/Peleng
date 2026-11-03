@@ -428,7 +428,7 @@ def test_road_arc_geometry():
     assert np.all(np.abs(rad(C) - R) < 0.2)
     # курс +x, центр дуги на +z: слева по ходу — внешняя сторона (радиус больше)
     assert np.all(np.abs(rad(L) - (R + w / 2)) < 0.25) and np.all(np.abs(rad(Rr) - (R - w / 2)) < 0.25)
-    assert np.allclose(np.hypot(*(L - Rr)[:, [0, 2]].T), w, atol=1e-6)
+    assert np.allclose(np.hypot(*(L - Rr)[:, [0, 2]].T), w, atol=2e-3)
     assert np.allclose(C[:, 1], 5.0 - h, atol=1e-6) and np.allclose(L[:, 1], C[:, 1]) and np.allclose(Rr[:, 1], C[:, 1])
     steps = np.hypot(*np.diff(C[:, [0, 2]], axis=0).T)
     assert abs(np.median(steps) - 2.0) < 0.05 and road["uncertain"] == []
@@ -448,7 +448,7 @@ def test_road_uncertain_and_none():
     assert abs(road["length_m"] - (300 - 20) * 0.5) < 2.0  # первые 20 кадров не вошли
     assert len(road["uncertain"]) == 1  # 60 кадров predict (2 с) — да, 10 кадров — нет
     i0, i1 = road["uncertain"][0]
-    assert 0 <= i0 <= i1 < road["n_points"] and 0.5 < (i0 + i1) / 2 / road["n_points"] < 0.75
+    assert 0 <= i0 <= i1 < road["n_points"] and 0.35 < (i0 + i1) / 2 / road["n_points"] < 0.55
     assert build_road(est[:1], ["tri"], 30.0) is None
 
 

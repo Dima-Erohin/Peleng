@@ -59,18 +59,19 @@ def _hampel(P: np.ndarray, win: int, k: float = 3.0, floor_m: float = 1.0) -> np
 
 
 def _gauss_smooth(P: np.ndarray, step_m: float, sigma_m: float) -> np.ndarray:
-    """Гауссово сглаживание равномерно прореженной линии (нормировка ядра на краях — без «завала» к нулю)."""
+    """Гауссово сглаживание равномерно прореженной линии. На краях — нечётное отражение относительно концов
+    (2·P0 − P[i]): линейный тренд сохраняется, концы дороги не «подтягиваются» внутрь."""
     if sigma_m <= 0 or len(P) < 3:
         return P.copy()
     sig = sigma_m / step_m
     r = int(np.ceil(3 * sig))
     w = np.exp(-0.5 * (np.arange(-r, r + 1) / sig) ** 2)
-    out = np.empty_like(P)
-    for i in range(len(P)):
-        a, b = max(0, i - r), min(len(P), i + r + 1)
-        ww = w[a - i + r: b - i + r]
-        out[i] = (P[a:b] * ww[:, None]).sum(0) / ww.sum()
-    return out
+    w /= w.sum()
+    n = len(P)
+    idx = np.arange(-r, n + r)
+    lo, hi = np.clip(-idx, 0, n - 1), np.clip(2 * (n - 1) - idx, 0, n - 1)
+    pad = np.where((idx < 0)[:, None], 2 * P[0] - P[lo], np.where((idx > n - 1)[:, None], 2 * P[-1] - P[hi], P[np.clip(idx, 0, n - 1)]))
+    return np.stack([np.convolve(pad[:, c], w, mode="valid") for c in range(P.shape[1])], 1)
 
 
 def _segments(mask: np.ndarray) -> list[list[int]]:
