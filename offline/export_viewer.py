@@ -68,12 +68,7 @@ def _r(v, nd=2):
     return None if v is None or not np.isfinite(v) else round(float(v), nd)
 
 
-def build(data_dir, run_dir) -> dict:
-    ds = load_dataset(data_dir)
-    run_dir = Path(run_dir)
-    info = json.loads((run_dir / "run_info.json").read_text(encoding="utf-8")) if (run_dir / "run_info.json").exists() else {}
-    diag = list(csv.DictReader(open(run_dir / "trajectory_diag.csv", encoding="utf-8"), delimiter=";"))
-    n = len(diag)
+def cameras_block(ds, n: int) -> list[dict]:
     cams = []
     for c in ds.cameras:
         m0 = c.model(0)
@@ -99,41 +94,76 @@ def build(data_dir, run_dir) -> dict:
                 "three_quaternion": [three_camera(c.model(k))["quaternion"] for k in range(n)],
             }
         cams.append(cam)
-    est = np.array([[float(r[k]) if r[k] else np.nan for k in ("Loc_X", "Loc_Y", "Loc_Z")] for r in diag])
-    est3 = ue_to_three(est)
-    out = {
-        "format": "peleng-offline-viewer/1",
+    return cams
+
+
+def object_block(name: str, diag_rows: list[dict], truth_ue, det_path: Path | None, csv_name: str) -> dict:
+    est = np.array([[float(r[k]) if r[k] else np.nan for k in ("Loc_X", "Loc_Y", "Loc_Z")] for r in diag_rows])
+    ob = {
+        "name": name, "csv": csv_name,
+        "estimate": {
+            "ue_cm": [[_r(v) for v in p] for p in est],
+            "three_m": [[_r(v, 3) for v in p] for p in ue_to_three(est)],
+            "mode": [r["mode"] for r in diag_rows],
+            "n_cams": [int(r["n_cams"]) for r in diag_rows],
+            "cams": [[int(x) for x in r["cams"].split(",") if x] for r in diag_rows],
+            # used_det[k] = [[i, j], ...]: детекция j камеры cameras[i] вошла в обновление кадра k
+            "used_det": [[[int(v) for v in x.split(":")] for x in (r.get("used_det") or "").split(",") if x] for r in diag_rows],
+            "sigma_m": [_r(float(r["sigma_m"]), 3) for r in diag_rows],
+            "speed_mps": [_r(float(r["speed_mps"]), 2) for r in diag_rows],
+        },
+    }
+    if truth_ue is not None:
+        T = truth_ue[: len(est)]
+        ob["truth"] = {"ue_cm": [[_r(v) for v in p] for p in T], "three_m": [[_r(v, 3) for v in p] for p in ue_to_three(T)]}
+        ob["estimate"]["err3d_m"] = [_r(v, 3) for v in np.linalg.norm(est - T, axis=1) / 100.0]
+    if det_path is not None and Path(det_path).exists():
+        d = json.loads(Path(det_path).read_text())
+        ob["detections"] = {"fields": ["x1", "y1", "x2", "y2", "u", "v", "score", "cls", "source"],
+                            "cams": d.get("cams"), "frames": d["frames"][: len(est)]}
+    return ob
+
+
+def _road_cfg(o: dict) -> dict | None:
+    """Настройки дороги объекта: из результата прогона (`_road`), иначе из пресета с тем же именем."""
+    if "_road" in o:
+        return o["_road"]
+    from .presets import PRESETS
+
+    return next((p.get("road") for p in PRESETS.values() if p["name"] == o["name"] and p.get("road")), None)
+
+
+def build_multi(ds, run_dir, results: list[dict] | None, n: int | None = None, road: bool = True) -> dict:
+    """JSON для фронтенда по папке прогона run.py (все объекты). road=False — без блока "road"."""
+    run_dir = Path(run_dir)
+    info = json.loads((run_dir / "run_info.json").read_text(encoding="utf-8")) if (run_dir / "run_info.json").exists() else {}
+    objs = results if results is not None else info.get("objects", [])
+    out_objs = []
+    for o in objs:
+        csv_name = Path(o["csv"]).name
+        diag = run_dir / (Path(csv_name).stem + "_diag.csv")
+        rows = list(csv.DictReader(open(diag, encoding="utf-8"), delimiter=";"))
+        truth = ds.truth_ue if o.get("metrics") is not None else None
+        out_objs.append(object_block(o["name"], rows, truth, run_dir / o["name"] / "detections_used.json", csv_name))
+    n = n or (len(out_objs[0]["estimate"]["mode"]) if out_objs else ds.n_frames)
+    res = {
+        "format": "peleng-offline-viewer/2",
         "fps": ds.fps, "n_frames": n,
         "coords": {"ue": "Unreal: см, левая, X вперёд, Y вправо, Z вверх",
                    "three": "Three.js: м, правая, Y вверх; (x,y,z) = (X_ue, Z_ue, Y_ue)/100"},
-        "cameras": cams,
-        "estimate": {
-            "ue_cm": [[_r(v) for v in p] for p in est],
-            "three_m": [[_r(v, 3) for v in p] for p in est3],
-            "mode": [r["mode"] for r in diag],
-            "n_cams": [int(r["n_cams"]) for r in diag],
-            "cams": [[int(x) for x in r["cams"].split(",") if x] for r in diag],
-            "sigma_m": [_r(float(r["sigma_m"]), 3) for r in diag],
-            "speed_mps": [_r(float(r["speed_mps"]), 2) for r in diag],
-        },
-        "run": {k: info.get(k) for k in ("args", "git", "time_s", "metrics_summary", "trajectory_sha256")},
+        "cameras": cameras_block(ds, n),
+        "objects": out_objs,
+        "run": {k: info.get(k) for k in ("argv", "git", "time_s")},
     }
-    if ds.truth_ue is not None:
-        T = ds.truth_ue[:n]
-        out["truth"] = {"ue_cm": [[_r(v) for v in p] for p in T], "three_m": [[_r(v, 3) for v in p] for p in ue_to_three(T)]}
-        err = np.linalg.norm(est - T, axis=1) / 100.0
-        out["estimate"]["err3d_m"] = [_r(v, 3) for v in err]
-    # детекции из кэша прогона
-    cache = (info.get("detection") or {}).get("cache")
-    if cache and Path(cache).exists():
-        d = json.loads(Path(cache).read_text())
-        ids = d.get("cams", [c.cam_id for c in ds.cameras])
-        out["detections"] = {
-            "fields": ["x1", "y1", "x2", "y2", "u", "v", "score", "cls", "source"],
-            "cams": ids,
-            "frames": d["frames"][:n],  # frames[k][i] — список детекций камеры cams[i] на кадре k
-        }
-    return out
+    if road:  # дорога = сглаженная траектория первого объекта, у которого она включена (грузовик); см. road.py
+        from .road import add_road
+
+        for o in objs:
+            cfg = _road_cfg(o)
+            if cfg and cfg.get("enabled", True):
+                add_road(res, o["name"], **{k: v for k, v in cfg.items() if k != "enabled"})
+                break
+    return res
 
 
 def main(argv=None):
@@ -141,8 +171,10 @@ def main(argv=None):
     ap.add_argument("--data", required=True)
     ap.add_argument("--run", required=True, help="папка результатов run.py")
     ap.add_argument("--out", default=None, help="по умолчанию <run>/viewer.json")
+    ap.add_argument("--no-road", action="store_true", help="не писать дорогу (road)")
     a = ap.parse_args(argv)
-    res = build(a.data, a.run)
+    ds = load_dataset(a.data)
+    res = build_multi(ds, a.run, None, road=not a.no_road)
     p = Path(a.out) if a.out else Path(a.run) / "viewer.json"
     p.write_text(json.dumps(res, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     print(f"{p}  ({p.stat().st_size / 1e6:.1f} МБ)")

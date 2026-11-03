@@ -22,10 +22,20 @@ from .detect_base import Detection, Detector
 
 
 class BackgroundDetector(Detector):
+    """Причинное вычитание фона (см. описание модуля).
+
+    Фон — экспоненциальное среднее прошлых кадров. Опции (по умолчанию выключены — на тестовом наборе они дали
+    больше ложных пятен): selective — выборочное обновление (передний план фон не портит, нет «следа»; пиксель,
+    бывший передним планом дольше absorb_frames кадров, вливается в фон); shadow — тени (темнее фона при том же
+    цвете) не считаются передним планом."""
+
     name = "bg"
+    version = 2
 
     def __init__(self, scale: int = 2, alpha: float = 0.03, thresh: int = 25, warmup: int = 10,
-                 min_area_px: float = 80.0, max_blobs: int = 8, blur: int = 3):
+                 min_area_px: float = 80.0, max_blobs: int = 8, blur: int = 3, selective: bool = False,
+                 absorb_frames: int = 150, shadow: bool = False, shadow_ratio: tuple = (0.4, 0.92),
+                 shadow_chroma: float = 0.06):
         self.scale = scale
         self.alpha = alpha
         self.thresh = thresh
@@ -33,11 +43,17 @@ class BackgroundDetector(Detector):
         self.min_area_px = min_area_px  # в пикселях полного кадра
         self.max_blobs = max_blobs
         self.blur = blur
+        self.selective = selective
+        self.absorb_frames = absorb_frames
+        self.shadow = shadow
+        self.shadow_ratio = shadow_ratio
+        self.shadow_chroma = shadow_chroma
         self.state: dict[int, dict] = {}
 
     def config(self) -> dict:
-        return {"name": self.name, "scale": self.scale, "alpha": self.alpha, "thresh": self.thresh,
-                "warmup": self.warmup, "min_area_px": self.min_area_px, "max_blobs": self.max_blobs}
+        return {"name": self.name, "v": self.version, "scale": self.scale, "alpha": self.alpha, "thresh": self.thresh,
+                "warmup": self.warmup, "min_area_px": self.min_area_px, "max_blobs": self.max_blobs,
+                "selective": self.selective, "absorb": self.absorb_frames, "shadow": self.shadow}
 
     def _small(self, image: np.ndarray) -> np.ndarray:
         h, w = image.shape[:2]
@@ -59,22 +75,33 @@ class BackgroundDetector(Detector):
             if np.linalg.norm(prev.center - camera_model.center) > 1e-3:
                 st = None  # камера переместилась — фон заново
             elif np.abs(prev.R - camera_model.R).max() > 1e-9:
+                # чистый поворот: перенос фона гомографией H = K R_k R_{k-1}^T K^-1
                 Ks = self._Ks(camera_model)
                 Hm = Ks @ camera_model.R @ prev.R.T @ np.linalg.inv(Ks)
                 dsize = (img.shape[1], img.shape[0])
                 st["bg"] = cv2.warpPerspective(st["bg"], Hm, dsize, flags=cv2.INTER_LINEAR)
                 st["cnt"] = cv2.warpPerspective(st["cnt"], Hm, dsize, flags=cv2.INTER_NEAREST, borderValue=0)
+                st["fgc"] = cv2.warpPerspective(st["fgc"], Hm, dsize, flags=cv2.INTER_NEAREST, borderValue=0)
         if st is None:
-            st = {"bg": img.copy(), "cnt": np.ones(img.shape[:2], np.float32), "cam": camera_model}
+            st = {"bg": img.copy(), "cnt": np.ones(img.shape[:2], np.float32), "fgc": np.zeros(img.shape[:2], np.float32),
+                  "cam": camera_model}
             self.state[cam_id] = st
             return []
         dets: list[Detection] = []
         valid = st["cnt"] >= self.warmup
+        bg = st["bg"]
+        diff = np.abs(img - bg).max(axis=2)
+        fg = (diff > self.thresh) & valid
+        if self.shadow:
+            ib, ii = bg.sum(axis=2) + 1e-3, img.sum(axis=2) + 1e-3
+            ratio = ii / ib
+            chroma = np.abs(img / ii[..., None] - bg / ib[..., None]).max(axis=2)
+            shadow = (ratio > self.shadow_ratio[0]) & (ratio < self.shadow_ratio[1]) & (chroma < self.shadow_chroma)
+            fg &= ~shadow
+        m = fg.astype(np.uint8)
+        m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+        m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
         if valid.any():
-            diff = np.abs(img - st["bg"]).max(axis=2)
-            m = ((diff > self.thresh) & valid).astype(np.uint8)
-            m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
-            m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
             n, _, stats, cen = cv2.connectedComponentsWithStats(m)
             s = self.scale
             cand = []
@@ -92,7 +119,14 @@ class BackgroundDetector(Detector):
         # обновление фона — ПОСЛЕ детекции (кадр k не участвует в своём же фоне)
         a = self.alpha
         fresh = st["cnt"] < 1
-        st["bg"] = np.where(fresh[..., None], img, (1 - a) * st["bg"] + a * img).astype(np.float32)
+        fgd = cv2.dilate(m, np.ones((5, 5), np.uint8)).astype(bool)
+        st["fgc"] = np.where(fgd, st["fgc"] + 1, 0).astype(np.float32)
+        absorb = (st["fgc"] > self.absorb_frames) if self.selective else np.zeros_like(fgd)
+        upd = ((~fgd) | absorb) if self.selective else np.ones_like(fgd)
+        newbg = np.where(upd[..., None], (1 - a) * bg + a * img, bg)
+        newbg = np.where((fresh | absorb)[..., None], img, newbg)
+        st["fgc"][absorb] = 0
+        st["bg"] = newbg.astype(np.float32)
         st["cnt"] = np.minimum(st["cnt"] + 1, 10000).astype(np.float32)
         st["cam"] = camera_model
         return dets
@@ -136,6 +170,16 @@ def _ioa(inner, outer) -> float:
     inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
     a = max(1e-6, (inner[2] - inner[0]) * (inner[3] - inner[1]))
     return inter / a
+
+
+def combine_dets(dy: list[Detection], db: list[Detection], bg_score_scale: float = 0.6) -> list[Detection]:
+    """Объединение YOLO и вычитания фона: пятна внутри рамок YOLO (или содержащие их) отбрасываются."""
+    out = list(dy)
+    for d in db:
+        if any(_ioa(d.bbox, y.bbox) > 0.5 or _ioa(y.bbox, d.bbox) > 0.5 for y in dy):
+            continue
+        out.append(Detection(d.bbox, d.point_px, d.score * bg_score_scale, d.cls, d.source, d.extra))
+    return out
 
 
 class CombinedDetector(Detector):

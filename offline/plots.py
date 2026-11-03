@@ -8,7 +8,7 @@ import numpy as np
 C_EST = "#2a78d6"  # наша оценка — синий
 C_TRUTH = "#eb6834"  # эталон — оранжевый
 C_GRID = "#d9d8d3"
-MODE_COLORS = {"tri": "#1baf7a", "init": "#1baf7a", "mono": "#eda100", "predict": "#9a9a95", "none": "#ffffff"}
+MODE_COLORS = {"tri": "#1baf7a", "init": "#1baf7a", "mono": "#eda100", "mono_size_prior": "#e87ba4", "predict": "#9a9a95", "none": "#ffffff"}
 
 
 def _style(ax):
@@ -66,7 +66,7 @@ def make_plots(out_dir: Path, est_ue: np.ndarray, truth_ue: np.ndarray | None, m
     ax.plot(E[:, 0], E[:, 1], color=C_EST, lw=1.5, label="оценка")
     if modes is not None:
         m = np.asarray(modes)
-        for md, mk in (("mono", "o"), ("predict", "x")):
+        for md, mk in (("mono", "o"), ("mono_size_prior", "o"), ("predict", "x")):
             s = m == md
             if s.any():
                 ax.scatter(E[s, 0], E[s, 1], s=6, marker=mk, color=MODE_COLORS[md], label=f"режим {md}", zorder=3)
