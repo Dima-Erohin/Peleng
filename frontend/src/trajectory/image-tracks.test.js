@@ -23,6 +23,10 @@ test("actual drone image track preserves video timing, seed, losses and camera i
 test("image tracks reject fake boxes in gaps, invalid timestamps, dimensions and non-finite data", () => {
   for (const mutate of [
     (track) => { track.width = 0; },
+    (track) => { track.camera_id = {}; },
+    (track) => { track.object_id = 42; },
+    (track) => { track.label = {}; },
+    (track) => { track.fps = 241; },
     (track) => { track.frames[0].time = 10; },
     (track) => { track.frames[0].bbox = [0, 0, 2000, 10]; },
     (track) => { track.frames[0].correlation = NaN; },

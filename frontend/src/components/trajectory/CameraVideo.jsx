@@ -11,7 +11,7 @@ export default function CameraVideo({ clips, imageTracks = [], time, playing, ra
   const currentTime = useRef(time);
   currentTime.current = time;
   const selected = clips.find((clip) => clip.id === selectedId) || clips[0];
-  const imageTrack = imageTracks.find((track) => track.camera_id === selected?.id);
+  const selectedTracks = imageTracks.filter((track) => track.camera_id === selected?.id);
   useEffect(() => {
     setError("");
     setReady(false);
@@ -63,7 +63,8 @@ export default function CameraVideo({ clips, imageTracks = [], time, playing, ra
               aria-label={selected.name}
             />
             <span className="video-camera-label">{selected.name}</span>
-            <ImageTrackOverlay track={imageTrack} videoRef={videoRef} time={time} ready={ready} />
+            {selectedTracks.map((track, index) => <ImageTrackOverlay key={track.object_id} track={track}
+              videoRef={videoRef} time={time} ready={ready} statusIndex={index} />)}
             <button type="button" className="video-expand" aria-label="Развернуть контрольное видео"
               onClick={() => {
                 if (!frameRef.current?.requestFullscreen) { setError("Полноэкранный режим недоступен в этом браузере"); return; }

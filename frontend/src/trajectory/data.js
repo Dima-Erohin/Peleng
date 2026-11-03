@@ -208,11 +208,11 @@ export async function loadDemo(signal) {
     rows.slice(1).forEach((row, i) => rotations.set(row.split(";").slice(4, 7).map(Number), i * 3));
     return {
       ...createTrack({ id: `cam-${index + 1}`, samples, units: "cm" }),
-      rotations, focal: Number(rows[0].split(";").at(-1)), name: `Камера ${index + 1}`,
+      rotations, focal: Number(rows[0].split(";").at(-1)), sensorWidth: 23.76, sensorHeight: 13.365, name: `Камера ${index + 1}`,
     };
   });
   return createDataset(
-    [parseTrajectoryCsv(object, { id: "truck-1", name: "Cargo Truck · 01" })],
+    [{ ...parseTrajectoryCsv(object, { id: "truck-1", name: "Cargo Truck · 01" }), kind: "truck", source: "reference" }],
     {
       name: "Project 02", cameras, imageTracks: [parseImageTrack(JSON.parse(droneText))],
       dataQuality: JSON.parse(reportText),

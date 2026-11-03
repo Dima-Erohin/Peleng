@@ -3,6 +3,8 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { FBXLoader } from "three/addons/loaders/FBXLoader.js";
 import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { advancePlayback, sampleTrack } from "./data.js";
+import { observationRays } from "./reconstruction.js";
+import { createDroneModel } from "./drone-model.js";
 
 function disposeTree(root) {
   const geometries = new Set(), materials = new Set(), textures = new Set();
@@ -179,6 +181,7 @@ export class TrajectoryScene {
   }
 
   attachModel(object) {
+    if (object.track.kind === "drone" || object.track.kind === "object") return;
     if (!this.model) return;
     object.model = new THREE.Group();
     object.model.add(this.model.clone(true));
@@ -194,6 +197,7 @@ export class TrajectoryScene {
     this.scene.add(this.content);
     this.objects.clear();
     this.cameraObjects = [];
+    this.observationObjects = [];
     this.dataset = dataset;
     this.time = dataset.start;
     this.selected = dataset.tracks[0].id;
@@ -215,13 +219,31 @@ export class TrajectoryScene {
     this.content.add(grid);
     for (const track of dataset.tracks) {
       const group = new THREE.Group();
-      const ring = new THREE.Mesh(new THREE.RingGeometry(2.4, 2.5, 40), new THREE.MeshBasicMaterial({ color: track.color, side: THREE.DoubleSide, transparent: true }));
-      ring.position.z = -1.25;
+      const ringRadius = track.kind === "drone" ? 1 : 2.5;
+      const ring = new THREE.Mesh(new THREE.RingGeometry(ringRadius - 0.04, ringRadius, 40), new THREE.MeshBasicMaterial({ color: track.color, side: THREE.DoubleSide, transparent: true }));
+      ring.position.z = track.kind === "drone" ? -0.35 : -1.25;
       group.add(ring);
       const trail = buildTrail(track);
       this.content.add(group, trail.route, trail.travelled, trail.tip);
       const object = { track, group, ring, ...trail, sample: {}, heading: null, enabled: true };
+      if (track.kind === "drone") {
+        object.model = createDroneModel(track.color);
+        group.add(object.model);
+      } else if (track.kind === "object") {
+        group.add(new THREE.Mesh(new THREE.OctahedronGeometry(0.6), new THREE.MeshStandardMaterial({ color: track.color })));
+      }
       this.objects.set(track.id, object);
+    }
+    for (const reconstruction of dataset.reconstructions || []) {
+      const lines = lineSegments(new Float32Array(reconstruction.cameraIds.length * 6), 0x69b9ed, 0.5);
+      lines.name = `observation-rays:${reconstruction.id}`;
+      this.content.add(lines);
+      const marker = !reconstruction.hasTrack && reconstruction.validCount
+        ? reconstruction.kind === "drone" ? createDroneModel("#69b9ed")
+          : new THREE.Mesh(new THREE.OctahedronGeometry(0.6), new THREE.MeshStandardMaterial({ color: "#69b9ed" }))
+        : null;
+      if (marker) { marker.visible = false; this.content.add(marker); }
+      this.observationObjects.push({ reconstruction, lines, marker });
     }
     for (const camera of dataset.cameras) {
       const group = new THREE.Group();
@@ -286,6 +308,7 @@ export class TrajectoryScene {
 
   select(id) {
     this.selected = id;
+    this.dirtyPose = true;
     this.needsRender = true;
     if (this.follow) this.focus();
     this.emitFrame();
@@ -312,10 +335,27 @@ export class TrajectoryScene {
       this.camera.position.copy(this.controls.target).add(new THREE.Vector3(-0.45, -0.65, 0.65).normalize().multiplyScalar(distance));
     } else {
       const object = this.objects.get(this.selected);
-      if (!object) return;
+      if (!object) {
+        const rays = observationRays(this.dataset.imageTracks, this.dataset.cameras, this.selected, this.time);
+        if (!rays.length) return;
+        const { origin, direction } = rays[0];
+        const reconstruction = this.dataset.reconstructions.find((item) => item.id === this.selected);
+        const frame = reconstruction?.frames[Math.round(this.time * reconstruction.fps)];
+        if (frame?.position) {
+          this.controls.target.fromArray(frame.position);
+          this.camera.position.copy(this.controls.target).add(new THREE.Vector3(-5, -7, 5));
+        } else {
+          this.controls.target.fromArray(origin).addScaledVector(this.temp.fromArray(direction), 60);
+          this.camera.position.copy(this.controls.target).add(new THREE.Vector3(-65, -85, 65));
+        }
+        this.previousTarget.copy(this.controls.target);
+        this.controls.update();
+        return;
+      }
       const p = sampleTrack(object.track, this.time, object.sample);
       this.controls.target.set(p.x, p.y, p.z);
-      this.camera.position.set(p.x - 24, p.y - 34, p.z + 24);
+      const distance = object.track.kind === "drone" ? 0.18 : 1;
+      this.camera.position.set(p.x - 24 * distance, p.y - 34 * distance, p.z + 24 * distance);
     }
     this.previousTarget.copy(this.controls.target);
     this.controls.update();
@@ -358,14 +398,37 @@ export class TrajectoryScene {
         const from = r[index + axis] * Math.PI / 180, to = r[next + axis] * Math.PI / 180;
         return from + Math.atan2(Math.sin(to - from), Math.cos(to - from)) * p.alpha;
       };
-      object.group.rotation.set(angle(0), -angle(1), angle(2), "ZYX");
+      object.group.rotation.set(-angle(0), -angle(1), angle(2), "ZYX");
+    }
+    for (const { reconstruction, lines, marker } of this.observationObjects || []) {
+      const rays = observationRays(this.dataset.imageTracks, this.dataset.cameras, reconstruction.id, this.time);
+      const frame = reconstruction.frames[Math.round(this.time * reconstruction.fps)];
+      const position = lines.geometry.attributes.position;
+      rays.forEach((ray, i) => {
+        position.setXYZ(i * 2, ...ray.origin);
+        const end = frame?.position || ray.origin.map((value, axis) => value + ray.direction[axis] * 300);
+        position.setXYZ(i * 2 + 1, ...end);
+      });
+      position.needsUpdate = true;
+      lines.geometry.setDrawRange(0, rays.length * 2);
+      lines.visible = reconstruction.id === this.selected && this.objects.get(reconstruction.id)?.enabled !== false;
+      if (marker) {
+        marker.visible = Boolean(frame?.position);
+        if (frame?.position) marker.position.fromArray(frame.position);
+      }
     }
     this.dirtyPose = false;
   }
 
   emitFrame() {
     const object = this.objects.get(this.selected);
-    this.callbacks.onFrame({ time: this.time, sample: object ? { ...object.sample } : null });
+    const reconstruction = this.dataset?.reconstructions?.find((item) => item.id === this.selected);
+    const frame = reconstruction?.frames[Math.round(this.time * reconstruction.fps)];
+    const sample = object ? { ...object.sample } : frame?.position ? {
+      x: frame.position[0], y: frame.position[1], z: frame.position[2],
+      visible: true, speed: 0, distance: 0, motionAvailable: false,
+    } : null;
+    this.callbacks.onFrame({ time: this.time, sample });
   }
 
   tick(now) {

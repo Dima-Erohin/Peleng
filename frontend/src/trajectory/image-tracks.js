@@ -1,7 +1,10 @@
 export function parseImageTrack(value) {
-  if (value?.version !== 1 || value.space !== "image" || !value.camera_id || !value.object_id ||
+  if (value?.version !== 1 || value.space !== "image" ||
+      typeof value.camera_id !== "string" || !value.camera_id.trim() ||
+      typeof value.object_id !== "string" || !value.object_id.trim() ||
+      (value.label !== undefined && typeof value.label !== "string") ||
       !Number.isInteger(value.width) || value.width < 1 || !Number.isInteger(value.height) || value.height < 1 ||
-      !Number.isFinite(value.fps) || value.fps <= 0 ||
+      !Number.isFinite(value.fps) || value.fps <= 0 || value.fps > 240 ||
       !Number.isInteger(value.frame_count) || value.frame_count < 1 || value.frame_count > 200_000 ||
       !Array.isArray(value.frames) || value.frames.length !== value.frame_count) {
     throw new Error("Некорректный формат 2D-трека");
