@@ -10,7 +10,9 @@
   tracker       — параметры TrackerConfig (см. tracker3d.py);
   roi           — сильная модель в окне вокруг прогноза трекера: {"weights", "imgsz", "conf", "classes"} или null;
   truth         — сравнивать с эталоном из папки данных (если он есть);
-  fill_before_init — "first" | "empty": что писать в кадры до первой оценки.
+  fill_before_init — "first" | "empty": что писать в кадры до первой оценки;
+  road          — (необязательно) описание дороги для viewer.json, см. offline/road.py: {"enabled", "width_m",
+                  "width_factor", "h_pivot_m", ...}; выключить: --no-road или --set truck.road.enabled=false.
 
 Переопределение из командной строки: --set truck.tracker.accel_std=2 --set drone.detections=/path/dets.json
 (значение разбирается как JSON, иначе строка) или целиком файлом --objects-file objects.json.
@@ -19,6 +21,23 @@ from __future__ import annotations
 
 import copy
 import json
+
+# --- Геометрия грузовика (свойства модели; тот же грузовик в финальных видео) ---------------------------------
+# TRUCK_H_PIVOT_M — высота pivot модели над поверхностью дороги (м). Нужна offline/road.py: дорога рисуется
+# на высоте z_pivot − h_pivot. Получена ОДИН раз на тестовом наборе по эталону: на кадрах, где грузовик виден
+# >= 2 камерами, берётся луч через нижний-центр рамки детекции (низ рамки = контакт колёс с дорогой), он
+# пересекается с вертикалью через эталонный pivot (точка луча, ближайшая к вертикали), и z_pivot − z_луча даёт
+# высоту. Рамки — только те, что содержат проекцию pivot. Для камер с большим углом склонения ошибка огромна
+# (смещение колеса вдоль луча × tg угла: камеры 2 и 4 дают 3..7 м), поэтому оставлены лучи с углом склонения
+# < 5° (камеры 1, 3, 5; 371 луч): медиана 3.12 м, межквартильный 2.93..3.35 м, по третям набора 3.0 / 3.2 / 3.3 м;
+# по отдельным камерам 3.01 / 3.23 / 3.04 м. Округлено до 3.1 м, точность ~ ±0.2 м.
+TRUCK_H_PIVOT_M = 3.1
+# Ширина грузовика (м): типовая ширина полуприцепа/кузова 2.5 м (совпадает с априором габаритов DimsEstimator
+# в tracker3d.py); по видео не измерялась. Ширина дороги по умолчанию = 1.6 × это значение = 4.0 м.
+TRUCK_WIDTH_M = 2.5
+# Дорога в viewer.json (offline/road.py): enabled=false — не писать; width_m — задать ширину явно.
+TRUCK_ROAD = {"enabled": True, "h_pivot_m": TRUCK_H_PIVOT_M, "truck_width_m": TRUCK_WIDTH_M, "width_factor": 1.6,
+              "width_m": None}
 
 PRESETS: dict[str, dict] = {
     # Грузовик (эталон — Loc объекта = pivot модели, проецируется у переда кабины).
@@ -46,6 +65,7 @@ PRESETS: dict[str, dict] = {
                 "only_if_empty": True, "full_every": 10, "full_imgsz": 1280},
         "truth": True,
         "fill_before_init": "first",
+        "road": dict(TRUCK_ROAD),
     },
     # Грузовик детектором позы (offline/detectors/truck_pose.py, YOLO-pose, обученная на этом грузовике):
     # keypoint pivot = эталонная точка -> триангулируется сама точка pivot, смещения не нужны.
@@ -63,6 +83,7 @@ PRESETS: dict[str, dict] = {
         "roi": None,
         "truth": True,
         "fill_before_init": "first",
+        "road": dict(TRUCK_ROAD),
     },
     # Дрон: универсальная 3D-модель (без «земли»), допускает зависание. Детектор — из offline/detectors/
     # (делается отдельно); точка — та, что даёт детектор. Априорный размер (м) даёт дальность по одной камере.

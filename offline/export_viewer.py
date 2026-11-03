@@ -124,8 +124,17 @@ def object_block(name: str, diag_rows: list[dict], truth_ue, det_path: Path | No
     return ob
 
 
-def build_multi(ds, run_dir, results: list[dict] | None, n: int | None = None) -> dict:
-    """JSON для фронтенда по папке прогона run.py (все объекты)."""
+def _road_cfg(o: dict) -> dict | None:
+    """Настройки дороги объекта: из результата прогона (`_road`), иначе из пресета с тем же именем."""
+    if "_road" in o:
+        return o["_road"]
+    from .presets import PRESETS
+
+    return next((p.get("road") for p in PRESETS.values() if p["name"] == o["name"] and p.get("road")), None)
+
+
+def build_multi(ds, run_dir, results: list[dict] | None, n: int | None = None, road: bool = True) -> dict:
+    """JSON для фронтенда по папке прогона run.py (все объекты). road=False — без блока "road"."""
     run_dir = Path(run_dir)
     info = json.loads((run_dir / "run_info.json").read_text(encoding="utf-8")) if (run_dir / "run_info.json").exists() else {}
     objs = results if results is not None else info.get("objects", [])
@@ -137,7 +146,7 @@ def build_multi(ds, run_dir, results: list[dict] | None, n: int | None = None) -
         truth = ds.truth_ue if o.get("metrics") is not None else None
         out_objs.append(object_block(o["name"], rows, truth, run_dir / o["name"] / "detections_used.json", csv_name))
     n = n or (len(out_objs[0]["estimate"]["mode"]) if out_objs else ds.n_frames)
-    return {
+    res = {
         "format": "peleng-offline-viewer/2",
         "fps": ds.fps, "n_frames": n,
         "coords": {"ue": "Unreal: см, левая, X вперёд, Y вправо, Z вверх",
@@ -146,6 +155,15 @@ def build_multi(ds, run_dir, results: list[dict] | None, n: int | None = None) -
         "objects": out_objs,
         "run": {k: info.get(k) for k in ("argv", "git", "time_s")},
     }
+    if road:  # дорога = сглаженная траектория первого объекта, у которого она включена (грузовик); см. road.py
+        from .road import add_road
+
+        for o in objs:
+            cfg = _road_cfg(o)
+            if cfg and cfg.get("enabled", True):
+                add_road(res, o["name"], **{k: v for k, v in cfg.items() if k != "enabled"})
+                break
+    return res
 
 
 def main(argv=None):
@@ -153,9 +171,10 @@ def main(argv=None):
     ap.add_argument("--data", required=True)
     ap.add_argument("--run", required=True, help="папка результатов run.py")
     ap.add_argument("--out", default=None, help="по умолчанию <run>/viewer.json")
+    ap.add_argument("--no-road", action="store_true", help="не писать дорогу (road)")
     a = ap.parse_args(argv)
     ds = load_dataset(a.data)
-    res = build_multi(ds, a.run, None)
+    res = build_multi(ds, a.run, None, road=not a.no_road)
     p = Path(a.out) if a.out else Path(a.run) / "viewer.json"
     p.write_text(json.dumps(res, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     print(f"{p}  ({p.stat().st_size / 1e6:.1f} МБ)")

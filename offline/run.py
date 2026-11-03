@@ -158,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--truth", default=None, help="имя CSV эталона в папке данных (по умолчанию — найти автоматически)")
     ap.add_argument("--no-plots", action="store_true")
     ap.add_argument("--no-viewer", action="store_true", help="не писать viewer.json")
+    ap.add_argument("--no-road", action="store_true", help="не добавлять в viewer.json дорогу (road)")
     ap.add_argument("--strict", action="store_true",
                     help="падать при ошибке обработки объекта (по умолчанию — объект пропускается с сообщением, "
                          "остальные объекты обрабатываются)")
@@ -268,6 +269,7 @@ def run_object(ds, spec: dict, n: int, out_root: Path, a) -> dict:
     summary["sha256"] = _sha256(csv_path)
     summary["_P_ue"] = P_ue
     summary["_res"] = res
+    summary["_road"] = spec.get("road")
     return summary
 
 
@@ -304,7 +306,7 @@ def main(argv=None) -> dict:
     if not a.no_viewer and results:
         from .export_viewer import build_multi
 
-        vj = build_multi(ds, out, results, n)
+        vj = build_multi(ds, out, results, n, road=not a.no_road)
         (out / "viewer.json").write_text(json.dumps(vj, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
     for r in results:
         print(f"готово: {r['csv']}" + (f"  RMSE {r['metrics']['rmse3d_m']:.2f} м" if r.get("metrics") else ""), flush=True)

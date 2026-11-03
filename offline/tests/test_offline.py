@@ -404,3 +404,63 @@ def test_run_robust_inputs(tmp_path):
     rows = (out / "obj.csv").read_text().strip().splitlines()
     assert rows[0] == "Frame;Loc_X;Loc_Y;Loc_Z" and len(rows) == 1 + n_vid
     assert (out / "viewer.json").exists()
+
+
+def _arc_est(R=100.0, n=240, step_m=0.5, y_pivot=5.0, noise=0.0, seed=0):
+    """Дуга окружности радиуса R (центр в (0, R) по (x, z) three), курс +x, центр дуги слева направо — к +z."""
+    rng = np.random.default_rng(seed)
+    th = np.arange(n) * step_m / R
+    P3 = np.stack([R * np.sin(th), np.full(n, y_pivot), R - R * np.cos(th)], 1) + rng.normal(0, noise, (n, 3))
+    return np.stack([P3[:, 0], P3[:, 2], P3[:, 1]], 1) * 100.0  # three -> UE (см)
+
+
+def test_road_arc_geometry():
+    """Синтетическая дуга: ось на окружности, кромки на ±width/2, высота = pivot − h_pivot, выброс отброшен."""
+    from offline.road import build_road
+
+    R, w, h = 100.0, 4.0, 3.1
+    est = _arc_est(R)
+    est[100] += [3000.0, 0.0, 0.0]  # выброс 30 м
+    road = build_road(est, ["tri"] * len(est), 30.0, width_m=w, h_pivot_m=h, smooth_m=6.0)
+    C, L, Rr = (np.array(road[k]) for k in ("centerline", "left", "right"))
+    assert road["units"] == "three_m" and road["width_m"] == w and road["source"] == "trajectory_smoothed"
+    rad = lambda A: np.hypot(A[:, 0], A[:, 2] - R)
+    assert np.all(np.abs(rad(C) - R) < 0.2)
+    # курс +x, центр дуги на +z: слева по ходу — внешняя сторона (радиус больше)
+    assert np.all(np.abs(rad(L) - (R + w / 2)) < 0.25) and np.all(np.abs(rad(Rr) - (R - w / 2)) < 0.25)
+    assert np.allclose(np.hypot(*(L - Rr)[:, [0, 2]].T), w, atol=1e-6)
+    assert np.allclose(C[:, 1], 5.0 - h, atol=1e-6) and np.allclose(L[:, 1], C[:, 1]) and np.allclose(Rr[:, 1], C[:, 1])
+    steps = np.hypot(*np.diff(C[:, [0, 2]], axis=0).T)
+    assert abs(np.median(steps) - 2.0) < 0.05 and road["uncertain"] == []
+    assert abs(road["length_m"] - 120.0) < 2.0
+    assert np.allclose(np.array(road["ue_cm"]["centerline"])[:, 2] / 100.0, C[:, 1], atol=0.01)  # копия в Unreal
+
+
+def test_road_uncertain_and_none():
+    """`none` отбрасывается, длинный predict помечается uncertain, короткий — нет; ширина по умолчанию 1.6 × грузовик."""
+    from offline.road import build_road
+    from offline.presets import TRUCK_WIDTH_M
+
+    est = _arc_est(n=300, step_m=0.5)
+    modes = ["none"] * 20 + ["tri"] * 100 + ["predict"] * 60 + ["tri"] * 60 + ["predict"] * 10 + ["tri"] * 50
+    road = build_road(est, modes, 30.0)
+    assert abs(road["width_m"] - 1.6 * TRUCK_WIDTH_M) < 1e-9
+    assert abs(road["length_m"] - (300 - 20) * 0.5) < 2.0  # первые 20 кадров не вошли
+    assert len(road["uncertain"]) == 1  # 60 кадров predict (2 с) — да, 10 кадров — нет
+    i0, i1 = road["uncertain"][0]
+    assert 0 <= i0 <= i1 < road["n_points"] and 0.5 < (i0 + i1) / 2 / road["n_points"] < 0.75
+    assert build_road(est[:1], ["tri"], 30.0) is None
+
+
+def test_road_in_viewer_and_disable():
+    from offline.road import add_road
+
+    est = _arc_est(n=100)
+    v = {"fps": 30.0, "objects": [{"name": "truck", "estimate": {"ue_cm": est.tolist(), "mode": ["tri"] * 100},
+                                   "truth": {"ue_cm": est.tolist()}}]}
+    assert add_road(v, "truck") is not None and v["road"]["object"] == "truck" and v["road_gt"]["source"] == "truth_smoothed"
+    assert add_road({"objects": []}) is None
+    from offline.presets import get_specs
+
+    s = get_specs(["truck"], sets=["truck.road.enabled=false"])[0]
+    assert s["road"]["enabled"] is False and get_specs(["drone"])[0].get("road") is None
