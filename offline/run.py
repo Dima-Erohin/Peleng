@@ -45,7 +45,7 @@ class _Single:
 
 
 def track(ds, frames: list, cfg: TrackerConfig, n: int, refiner=None, log=print, multi: int = 0,
-          refiner_only_if_empty: bool = False):
+          refiner_only_if_empty: bool = False, refiner_full_every: int = 0, refiner_full_imgsz: int = 1280):
     """Причинный трекинг: кадр за кадром, выход кадра k зависит только от детекций кадров <= k.
 
     refiner (RoiRefiner) — сильный детектор в окне вокруг прогноза трекера (прогноз — по кадрам < k).
@@ -86,6 +86,11 @@ def track(ds, frames: list, cfg: TrackerConfig, n: int, refiner=None, log=print,
                 if img is not None:
                     for w in dict.fromkeys(wins):
                         roi += refiner.detect(ids[i], k, img, w)
+                    # трека нет/потерян и основной детектор пуст (например, камера движется и вычитание фона
+                    # отключено): раз в full_every кадров — сильная модель на весь кадр
+                    if lost and not base and refiner_full_every and k % refiner_full_every == 0:
+                        W, H = cam.size
+                        roi += refiner.detect(ids[i], k, img, (0, 0, max(W, H)), imgsz=refiner_full_imgsz)
                 row.append(merge(base, roi))
             if k % 100 == 0:
                 log(f"  трекинг+ROI: кадр {k}/{n}, {time.time() - t0:.0f} c, окон: сеть {refiner.n_run}, кэш {refiner.n_cached}")
@@ -153,8 +158,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--truth", default=None, help="имя CSV эталона в папке данных (по умолчанию — найти автоматически)")
     ap.add_argument("--no-plots", action="store_true")
     ap.add_argument("--no-viewer", action="store_true", help="не писать viewer.json")
-    ap.add_argument("--skip-missing", action="store_true",
-                    help="пропускать объект, если его детектор недоступен (иначе — ошибка)")
+    ap.add_argument("--strict", action="store_true",
+                    help="падать при ошибке обработки объекта (по умолчанию — объект пропускается с сообщением, "
+                         "остальные объекты обрабатываются)")
+    ap.add_argument("--skip-missing", action="store_true", help="(устарело; теперь поведение по умолчанию)")
     return ap
 
 
@@ -209,7 +216,9 @@ def run_object(ds, spec: dict, n: int, out_root: Path, a) -> dict:
                              cache_path=out / f"roi_cache_{Path(r.get('weights', 'yolo11m.pt')).stem}_{r.get('imgsz', 640)}.json")
     res, _, used, all_tracks = track(ds, frames, cfg, n, refiner, log=lambda m: print(m, flush=True),
                                      multi=int(spec.get("multi", 0)),
-                                     refiner_only_if_empty=bool((spec.get("roi") or {}).get("only_if_empty", False)))
+                                     refiner_only_if_empty=bool((spec.get("roi") or {}).get("only_if_empty", False)),
+                                     refiner_full_every=int((spec.get("roi") or {}).get("full_every", 0)),
+                                     refiner_full_imgsz=int((spec.get("roi") or {}).get("full_imgsz", 1280)))
     t_trk = time.time()
     (out / "detections_used.json").write_text(json.dumps({
         "note": "детекции, поданные в трекер, frames[k][i] -> камера cams[i]",
@@ -278,10 +287,13 @@ def main(argv=None) -> dict:
     for spec in specs:
         try:
             results.append(run_object(ds, spec, n, out, a))
-        except (ImportError, AttributeError, FileNotFoundError) as e:
-            if not a.skip_missing:
+        except Exception as e:  # noqa: BLE001 — один объект не должен ронять весь прогон
+            if a.strict:
                 raise
-            print(f"!!! объект {spec['name']} пропущен: детектор недоступен ({e})", flush=True)
+            import traceback
+
+            traceback.print_exc()
+            print(f"!!! объект {spec['name']} пропущен: {type(e).__name__}: {e}", flush=True)
     info = {
         "script": "offline/run.py", "argv": sys.argv[1:] if argv is None else argv, "git": _git_rev(),
         "python": platform.python_version(), "frames": n, "cameras": [c.cam_id for c in ds.cameras],

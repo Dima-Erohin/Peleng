@@ -21,9 +21,7 @@ import copy
 import json
 
 PRESETS: dict[str, dict] = {
-    # Грузовик (эталон тестового набора — ПЕРЁД кабины). Центр объекта — триангуляция центров рамок + EKF;
-    # выходная точка — перёд по курсу: центр + L/2 · направление скорости, длина L оценивается причинно по
-    # рамкам (DimsEstimator). Вертикальное ускорение наземной машины мало.
+    # Грузовик (эталон — Loc объекта = pivot модели, проецируется у переда кабины).
     "truck": {
         "name": "truck",
         "out_csv": "truck.csv",
@@ -32,15 +30,37 @@ PRESETS: dict[str, dict] = {
         "detector": "offline.detectors.truck:TruckDetector",
         "detector_kw": {},
         "detections": None,
-        # центр рамки -> EKF; выход — «перёд по курсу» (центр + L/2·направление скорости, L — DimsEstimator).
-        # σ ускорения 7 м/с² по горизонтали — компенсирует манёвры и «дрожание» центра рамки (подобрано на
-        # тестовом наборе: 3 -> 11.6 м RMSE, 5 -> 9.8, 7 -> 8.7, 10 -> 9.2); по вертикали — 0.5 (наземная машина).
-        "tracker": {"model": "cv", "accel_std": 7.0, "accel_std_z": 0.5, "point": "center", "meas": "point",
-                    "anchor": "front", "size_range": True, "px_sigma_rel": 0.15, "dims_mode": "median_L",
-                    "size_rel_min": 0.04, "size_rel_growth": 0.01},
-        # если TruckDetector в камере ничего не нашёл — сильная YOLO в окне вокруг причинного прогноза трекера
+        # Центр рамки -> EKF; выход — pivot модели грузовика = центр + 10.9 м вперёд по курсу и −0.45 м по высоте.
+        # Это свойство модели грузовика (тот же грузовик в финальных видео), измерено один раз по эталону
+        # тестового набора: медиана (эталон − оценка центра) в осях курса по кадрам с >= 2 камерами, устойчиво
+        # по третям набора (11.1 / 9.9 / 11.0 м). σ ускорения 5 м/с² (по вертикали 0.5 — наземная машина),
+        # σ пикселя 2 + 0.1·размер рамки — выбраны по устойчивости (leave-one-camera-out), см. README.
+        # Создание трека по одной камере выключено: без второй камеры дальность ненадёжна (хуже при выпадении камер).
+        "tracker": {"model": "cv", "accel_std": 5.0, "accel_std_z": 0.5, "point": "center", "meas": "point",
+                    "anchor": "center", "out_offset_fwd_m": 10.9, "out_offset_up_m": -0.45,
+                    "size_range": True, "px_sigma_rel": 0.10, "size_rel_min": 0.04, "size_rel_growth": 0.01,
+                    "mono_init": False},
+        # если основной детектор в камере ничего не нашёл — сильная YOLO в окне вокруг причинного прогноза;
+        # если трека нет — раз в 10 кадров на весь кадр (1280), чтобы начать/возобновить трек без вычитания фона
         "roi": {"weights": "yolo11m.pt", "imgsz": 640, "conf": 0.15, "classes": ["truck", "car", "bus"],
-                "only_if_empty": True},
+                "only_if_empty": True, "full_every": 10, "full_imgsz": 1280},
+        "truth": True,
+        "fill_before_init": "first",
+    },
+    # Грузовик детектором позы (offline/detectors/truck_pose.py, YOLO-pose, обученная на этом грузовике):
+    # keypoint pivot = эталонная точка -> триангулируется сама точка pivot, смещения не нужны.
+    # Веса: detector_kw.weights или переменная окружения TRUCK_WEIGHTS. Вычитание фона не используется —
+    # подходит для движущихся камер.
+    "truck_pose": {
+        "name": "truck",
+        "out_csv": "truck.csv",
+        "detector": "offline.detectors.truck_pose:TruckPoseDetector",
+        "detector_kw": {},
+        "detections": None,
+        "tracker": {"model": "cv", "accel_std": 5.0, "accel_std_z": 0.5, "point": "kp:pivot", "meas": "point",
+                    "anchor": "center", "size_range": True, "px_sigma_rel": 0.10, "size_rel_min": 0.04,
+                    "size_rel_growth": 0.01, "mono_init": False},
+        "roi": None,
         "truth": True,
         "fill_before_init": "first",
     },

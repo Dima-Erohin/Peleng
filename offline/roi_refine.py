@@ -75,9 +75,11 @@ class RoiRefiner:
         y0 = int(np.clip(y0, 0, max(0, H - side)))
         return x0, y0, side
 
-    def detect(self, cam_id: int, frame: int, image: np.ndarray, win: tuple[int, int, int]) -> list[Detection]:
+    def detect(self, cam_id: int, frame: int, image: np.ndarray, win: tuple[int, int, int],
+               imgsz: int | None = None) -> list[Detection]:
         x0, y0, side = win
-        key = f"{cam_id}:{frame}:{x0}:{y0}:{side}"
+        imgsz = imgsz or self.imgsz
+        key = f"{cam_id}:{frame}:{x0}:{y0}:{side}" + (f":{imgsz}" if imgsz != self.imgsz else "")
         if key in self.cache:
             self.n_cached += 1
             return [Detection.from_list(a) for a in self.cache[key]]
@@ -85,7 +87,7 @@ class RoiRefiner:
         H, W = image.shape[:2]
         crop = image[y0:min(H, y0 + side), x0:min(W, x0 + side)]
         t = time.time()
-        r = self.model.predict(crop, imgsz=self.imgsz, conf=self.conf, classes=self.class_ids, verbose=False,
+        r = self.model.predict(crop, imgsz=imgsz, conf=self.conf, classes=self.class_ids, verbose=False,
                                device=self.device)[0]
         self.t_model += time.time() - t
         self.n_run += 1

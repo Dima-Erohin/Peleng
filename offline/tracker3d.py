@@ -136,7 +136,7 @@ def det_point(d: Detection, mode: str) -> np.ndarray:
         kp = d.keypoint(mode[3:])
         if kp is not None:
             return np.array(kp)
-        return np.array([(x1 + x2) / 2, (y1 + y2) / 2])
+        return np.asarray(d.point_px, dtype=np.float64)  # нет ключевой точки — точка детектора
     if mode == "bottom":
         return np.array([(x1 + x2) / 2, y2])
     if mode == "top":

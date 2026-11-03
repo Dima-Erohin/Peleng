@@ -244,7 +244,7 @@ def _find_video(root: Path, name: str, num: str) -> Path | None:
     return cands[0] if cands else None
 
 
-def load_dataset(root, truth_name: str | None = None) -> UEDataset:
+def load_dataset(root, truth_name: str | None = None, log=print) -> UEDataset:
     """Найти в папке CSV камер (object_transform_<Имя><N>.csv), видео (*<Имя><N>.mp4) и эталон (CSV без Rot_*)."""
     import cv2
 
@@ -278,17 +278,35 @@ def load_dataset(root, truth_name: str | None = None) -> UEDataset:
     cams.sort(key=lambda c: c.cam_id)
     if not cams:
         raise FileNotFoundError(f"в {root} нет CSV камер object_transform_*N.csv")
-    n = min(c.table.n for c in cams)
+    # число кадров: по самому длинному видео (камеры с более коротким видео/CSV на хвосте просто «не видят»;
+    # поза камеры за концом её CSV — последняя известная), но не больше самого длинного CSV
+    n_csv = max(c.table.n for c in cams)
     nv = []
+    fps = 30.0
     for c in cams:
-        if c.video_path is not None:
-            cap = cv2.VideoCapture(str(c.video_path))
-            nv.append(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)))
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-            cap.release()
-    if nv:
-        n = min(n, min(nv))
-    return UEDataset(root, cams, truth, truth_bad, n, fps if nv else 30.0)
+        if c.video_path is None:
+            log(f"внимание: для камеры {c.name} нет видео — она не участвует в детекции")
+            continue
+        cap = cv2.VideoCapture(str(c.video_path))
+        cnt = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        if not cap.isOpened() or cnt <= 0:
+            log(f"внимание: видео {c.video_path.name} не открывается — камера {c.name} без детекций")
+            c.video_path = None
+        else:
+            nv.append(cnt)
+            fps = cap.get(cv2.CAP_PROP_FPS) or fps
+            if cnt != c.table.n:
+                log(f"внимание: камера {c.name}: кадров в видео {cnt}, строк в CSV {c.table.n}")
+        cap.release()
+        if not np.isfinite(c.focal_mm) or c.focal_mm <= 0:
+            log(f"внимание: камера {c.name}: фокус не найден в CSV, принят 35 мм")
+            c.focal_mm = 35.0
+        if c.table.bad_frames:
+            log(f"камера {c.name}: битые ячейки в кадрах {c.table.bad_frames[:10]} — заполнены интерполяцией")
+    n = min(n_csv, max(nv)) if nv else n_csv
+    if truth is not None and truth_bad:
+        log(f"эталон: битые ячейки в кадрах {truth_bad[:10]} — заполнены интерполяцией")
+    return UEDataset(root, cams, truth, truth_bad, n, fps)
 
 
 class SyncVideoReader:
@@ -297,7 +315,7 @@ class SyncVideoReader:
     def __init__(self, paths: list[Path], n_frames: int | None = None):
         import cv2
 
-        self.caps = [cv2.VideoCapture(str(p)) for p in paths]
+        self.caps = [cv2.VideoCapture(str(p)) if p is not None else None for p in paths]
         self.n = n_frames
 
     def __iter__(self):
@@ -305,11 +323,12 @@ class SyncVideoReader:
         while self.n is None or k < self.n:
             imgs = []
             for cap in self.caps:
-                ok, img = cap.read()
+                ok, img = cap.read() if cap is not None else (False, None)
                 imgs.append(img if ok else None)
-            if all(i is None for i in imgs):
-                break
+            if all(i is None for i in imgs) and self.n is None:
+                break  # при заданном числе кадров отдаём пустые кадры до конца (видео короче CSV)
             yield k, imgs
             k += 1
         for cap in self.caps:
-            cap.release()
+            if cap is not None:
+                cap.release()

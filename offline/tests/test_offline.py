@@ -326,3 +326,81 @@ def test_static_single_camera_size_prior():
     modes = [h.mode for h in tr.history]
     assert modes[100] == "mono_size_prior" and modes[350] == "predict"
     assert np.median(err[50:300]) < 0.5 and err[399] < 3.0
+
+
+def test_moving_cameras_tracker():
+    """Камеры движутся (положение и поворот по кадрам, как в CSV): модель камеры на каждый кадр — RMSE в норме."""
+    n = 300
+    T = truth_traj(n)
+    rng = np.random.default_rng(7)
+    base = [np.array(loc, float) for loc, _, _ in CAMS_UE[:4]]
+    focal = [f for _, _, f in CAMS_UE[:4]]
+    frames, cams_k = [], []
+    for k in range(n):
+        cams = []
+        for i, (b, f) in enumerate(zip(base, focal)):
+            # камера едет по кругу радиусом 30 м и поднимается, всё время смотрит на объект (с запаздыванием)
+            a = k / FPS * 0.3 + i
+            loc = b + np.array([3000 * np.cos(a), 3000 * np.sin(a), 20.0 * k])
+            target = world_to_ue(T[max(k - 15, 0)])
+            cams.append(look_at_ue(loc, target, f))
+        cams_k.append(cams)
+        dl = []
+        for ci, cam in enumerate(cams):
+            uv = cam.project(T[k])[0] + rng.normal(0, 1.0, 2)
+            s = cam.K[0, 0] * 4.0 / cam.depth(T[k])[0]
+            dl.append([Detection((uv[0] - s, uv[1] - s / 2, uv[0] + s, uv[1] + s / 2), tuple(uv), 0.8, "truck", "synth")]
+                      if (ci != 2 or k < 150) else [])
+        frames.append(dl)
+    tr = Tracker3D(TrackerConfig(fps=FPS))
+    E = np.array([(lambda r: np.full(3, np.nan) if r.pos is None else r.pos)(tr.step(k, cams_k[k], frames[k])) for k in range(n)])
+    err = np.linalg.norm(E - T, axis=1)
+    assert np.sqrt(np.nanmean(err[10:] ** 2)) < 1.5
+
+
+def test_background_detector_moving_camera_off():
+    """Вычитание фона при перемещении камеры (не чистый поворот) сбрасывается и не даёт ложных пятен."""
+    from offline.basic_detectors import BackgroundDetector
+
+    rng = np.random.default_rng(0)
+    img = (rng.random((1080, 1920, 3)) * 255).astype(np.uint8)
+    det = BackgroundDetector(warmup=2)
+    out = []
+    for k in range(20):
+        cam = ue_camera_model((100.0 * k, 0.0, 500.0), 0.0, 0.0, 0.0, 35.0)  # камера едет
+        shifted = np.roll(img, 5 * k, axis=1)
+        out.append(det.detect(1, k, shifted, cam))
+    assert all(len(o) == 0 for o in out)
+
+
+def test_run_robust_inputs(tmp_path):
+    """Произвольный набор: 3 камеры (у одной нет видео), битые ячейки, без эталона, видео короче CSV,
+    объект с недоступным детектором — прогон не падает, CSV на все кадры."""
+    import cv2
+    import json as _json
+
+    from offline.run import main
+
+    n_csv, n_vid = 40, 30
+    for i, (loc, rot, f) in enumerate(CAMS_UE[:3], start=1):
+        lines = ["Frame;Loc_X;Loc_Y;Loc_Z;Rot_Roll;Rot_Pitch;Rot_Yaw;;;Focal length;" + str(f)]
+        for k in range(n_csv):
+            x = "авг.13" if (i == 2 and k == 5) else f"{loc[0] + 10 * k:.2f}".replace(".", ",")
+            lines.append(f"{k};{x};{loc[1]};{loc[2]};{rot[2]};{rot[0]};{rot[1]};;;" + ("матрица;23,76*13,365мм" if k == 0 else ";"))
+        (tmp_path / f"object_transform_Cam{i}.csv").write_bytes("\r\n".join(lines).encode("cp1251"))
+        if i < 3:
+            vw = cv2.VideoWriter(str(tmp_path / f"V.Cam{i}.mp4"), cv2.VideoWriter_fourcc(*"mp4v"), 30, (320, 180))
+            for k in range(n_vid):
+                im = np.full((180, 320, 3), 120, np.uint8)
+                cv2.rectangle(im, (10 + 3 * k, 80), (40 + 3 * k, 100), (255, 255, 255), -1)
+                vw.write(im)
+            vw.release()
+    objs = [{"name": "obj", "out_csv": "obj.csv", "detector": "bg", "tracker": {"point": "center"}},
+            {"name": "ghost", "out_csv": "ghost.csv", "detector": "no.such.module:Nope"}]
+    (tmp_path / "objs.json").write_text(_json.dumps(objs))
+    out = tmp_path / "out"
+    r = main(["--data", str(tmp_path), "--out", str(out), "--objects-file", str(tmp_path / "objs.json"), "--no-plots"])
+    assert (out / "obj.csv").exists() and not (out / "ghost.csv").exists()
+    rows = (out / "obj.csv").read_text().strip().splitlines()
+    assert rows[0] == "Frame;Loc_X;Loc_Y;Loc_Z" and len(rows) == 1 + n_vid
+    assert (out / "viewer.json").exists()

@@ -14,7 +14,8 @@
     задать свою (например, центр масс маски).
   * extra — произвольные данные (сохраняются в кэш, если сериализуемы в JSON). Ключевые точки — в
     extra["kp"] = {"имя": [u, v, conf]}; трекер с point="kp:имя" измеряет именно эту точку (например,
-    point="kp:pivot" для детектора позы грузовика), а при её отсутствии — центр рамки.
+    point="kp:pivot" для детектора позы грузовика; понимается и extra["pivot"] = (u, v) + extra["kp_conf"]),
+    а при её отсутствии — point_px.
   * score в [0, 1]; cls — строка ("truck", "drone", "motion", ...); source — имя детектора.
   * camera_model — модель камеры на этот кадр (рабочая система координат, см. ue_data.py); может
     пригодиться, например, для компенсации поворота камеры.
@@ -61,8 +62,13 @@ class Detection:
 
     def keypoint(self, name: str):
         """Ключевая точка из extra: extra["kp"][name] = [u, v] или [u, v, conf]; иначе None."""
-        kp = (self.extra or {}).get("kp") or {}
+        ex = self.extra or {}
+        kp = ex.get("kp") or {}
         v = kp.get(name) if isinstance(kp, dict) else None
+        if v is None and isinstance(ex.get(name), (list, tuple)):
+            v = ex[name]  # формат TruckPoseDetector: extra["pivot"] = (u, v), extra["kp_conf"]
+            if len(v) == 2 and ex.get("kp_conf") is not None:
+                v = [v[0], v[1], ex["kp_conf"]]
         if v is None or len(v) < 2:
             return None
         if len(v) > 2 and v[2] is not None and float(v[2]) < 0.3:

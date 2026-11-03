@@ -78,8 +78,8 @@ def run_detection(ds: UEDataset, detector, n_frames: int, out_dir: Path | None =
     t0 = time.time()
     frames: list = []
     vids = [c.video_path for c in ds.cameras]
-    if any(v is None for v in vids):
-        raise FileNotFoundError("не для всех камер найдено видео")
+    if all(v is None for v in vids):
+        raise FileNotFoundError("ни для одной камеры не найдено видео")
     tdet = 0.0
     for k, imgs in SyncVideoReader(vids, n_frames):
         row = []
