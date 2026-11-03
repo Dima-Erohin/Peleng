@@ -146,6 +146,7 @@ session_X_frames/
 | GET | `/api/demo/truth` | (демо) истинные позиции людей — для проверки точности |
 | * | `/api/accuracy/...` | проверки точности (доска, рулетка), отчёт — см. [accuracy.md](accuracy.md) |
 | GET | `/api/coverage?cell_m=0.2&height_m=0.9` | карта покрытия пола: сколько камер видят каждую клетку и ожидаемая σ — см. [coverage.md](coverage.md) |
+| * | `/api/chain/...` | калибровка цепочкой по парам камер (снимки, расчёт, применить); сообщение `{"type": "chain"}` — см. [chain-calibration.md](chain-calibration.md) |
 
 ## Приём кадров с телефона: WebSocket `/ws/push/{cam_id}`
 * текст `{"type":"hello","name":...,"width":...,"height":...}`;

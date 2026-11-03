@@ -364,6 +364,8 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
                 time.sleep(0.03)
         return dets
 
+    app.state.collect_board = _collect_board  # для расширений (ext/chain): сбор кадров доски в полном разрешении
+
     def _do_extrinsics(cam_ids: list[str] | None) -> dict:
         ids = [c for c in (cam_ids or list(registry.sources)) if c in registry.sources and registry.sources[c].online]
         if not ids:
@@ -384,10 +386,10 @@ def create_app(cfg: dict, demo: bool = False, replay: str | None = None, data_di
                 report[c] = {"ok": False, "message": res.message}
                 continue
             K = res.K if res.K is not None else m.K
-            meta = dict(m.meta)
+            meta = {k: v for k, v in m.meta.items() if not k.startswith("extr")}  # без следов прежней калибровки (напр. цепочкой)
             if res.K is not None:
                 meta["intrinsics"] = "approx+focal"
-            meta.update({"extrinsics_reproj_px": round(res.reproj_px, 2), "extrinsics_time": time.time(), "extrinsics_points": res.n_points})
+            meta.update({"extrinsics_method": "board", "extrinsics_reproj_px": round(res.reproj_px, 2), "extrinsics_time": time.time(), "extrinsics_points": res.n_points})
             new = CameraModel(K, m.dist, m.size, res.R, res.t, meta)
             registry.set_model(c, new)
             report[c] = {
