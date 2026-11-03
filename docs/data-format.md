@@ -90,6 +90,20 @@ Three.js по умолчанию Y-up: либо ставить `THREE.Object3D.D
 Режим выключен (`off`, по умолчанию) — `"objects": []`. В `stats` добавляется `objects_ms`.
 REST: `GET/POST /api/objects/` (режим, классы), `POST /api/objects/reset`.
 
+### Поле `zones` в `frame` — зоны и события (расширение «Зоны и события», [zones.md](zones.md))
+Появляется, если на полу нарисована хотя бы одна зона/линия (или в кадре были события):
+```jsonc
+"zones": {
+  "inside": { "z1": [ { "kind": "person", "id": 2, "dwell_s": 3.4 } ] },   // кто сейчас внутри каждой зоны
+  "lines":  { "l1": { "a_to_b": 5, "b_to_a": 2 } },                         // счётчики пересечений линий
+  "events": [                                                                // новые события за этот кадр
+    { "n": 17, "type": "enter | exit | line_cross", "t": 1730455201.5, "kind": "person", "id": 2,
+      "zone": "z1", "name": "Дверь", "dwell_s": 3.4, "reason": null, "pos": [x, y] }   // exit: dwell_s, reason: null | "lost" | "reset" | "end"
+  ]                                                                          // line_cross: "line", "name", "direction": "A→B | B→A"
+}
+```
+Поле попадает и в запись сессии. REST — `/api/zones/…` (зоны, линии, журнал, тепловая карта, анализ записи).
+
 ### `room_points` — «комната точками»
 ```json
 { "type": "room_points", "points": [[x,y,z], ...], "colors": [[r,g,b], ...], "pairs": [{"a":"redmi","b":"laptop","matches":120,"points":80}] }
