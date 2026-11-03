@@ -85,6 +85,34 @@ PRESETS: dict[str, dict] = {
         "fill_before_init": "first",
         "road": dict(TRUCK_ROAD),
     },
+    # Слияние: поза (YOLO-pose, точка pivot) — основной источник, база (TruckDetector + окно YOLO) — запасной в тех
+    # камерах/кадрах, где поза молчит. Состояние фильтра — сам pivot; запасная точка (центр рамки) измеряется со
+    # сдвигом (−10.9 м по курсу, +0.45 м вверх — та же константа модели грузовика), пока курс не надёжен — с большой σ.
+    # σ пикселя по невязкам после обновления (медиана |невязка|/размер рамки на тестовом наборе: поза 0.052, база 0.15).
+    # Рамки позы у края кадра отбрасываются; перезахват — только если чужая гипотеза держится 20 кадров.
+    # Веса позы: --set 'truck.detectors=...' или TRUCK_WEIGHTS; без весов работает как база.
+    "truck_fused": {
+        "name": "truck",
+        "out_csv": "truck.csv",
+        "detectors": [
+            {"detector": "offline.detectors.truck_pose:TruckPoseDetector", "detector_kw": {"conf": 0.35},
+             "optional": True},
+            {"detector": "offline.detectors.truck:TruckDetector", "detector_kw": {}},
+        ],
+        "fusion": {"mode": "fallback", "drop_border_px": 3.0},
+        "detector": "offline.detectors.truck:TruckDetector",
+        "detector_kw": {},
+        "detections": None,
+        "tracker": {"model": "cv", "accel_std": 5.0, "accel_std_z": 0.5, "point": "kp:pivot", "meas": "point",
+                    "anchor": "center", "size_range": True, "px_sigma_rel": 0.12, "px_sigma_rel_primary": 0.05,
+                    "size_rel_min": 0.04, "size_rel_growth": 0.01, "mono_init": False, "reinit_frames": 20,
+                    "primary_sources": ["truck_pose"], "secondary_point": "center",
+                    "secondary_offset": [-10.9, 0.0, 0.45]},
+        "roi": {"weights": "yolo11m.pt", "imgsz": 640, "conf": 0.15, "classes": ["truck", "car", "bus"],
+                "only_if_empty": True, "full_every": 10, "full_imgsz": 1280},
+        "truth": True,
+        "fill_before_init": "first",
+    },
     # Дрон: универсальная 3D-модель (без «земли»), допускает зависание. Детектор — из offline/detectors/
     # (делается отдельно); точка — та, что даёт детектор. Априорный размер (м) даёт дальность по одной камере.
     "drone": {

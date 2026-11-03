@@ -102,7 +102,16 @@ class TrackerConfig:
     box_dims_min: float = 0.3
     box_dims_max: float = 30.0
     box_point_classes: tuple = ("motion",)
-    weak_weight: float = 0.35  # вес «слабых» детекций (motion) при выборе гипотезы  # классы, для которых в модели box используется только центр рамки  # стороны рамки у края кадра не используются (объект обрезан)
+    weak_weight: float = 0.35
+    # Слияние детекторов: детекции из primary_sources (например, "truck_pose") измеряют точку состояния
+    # напрямую (точка cfg.point, обычно "kp:pivot"); остальные («запасные») — точку secondary_point, сдвинутую
+    # относительно состояния на secondary_offset (вперёд по курсу, влево, вверх; м). Пусто — все детекции одинаковы.
+    primary_sources: tuple = ()
+    secondary_point: str = "center"
+    secondary_offset: tuple = (0.0, 0.0, 0.0)
+    px_sigma_rel_primary: float = 0.03
+    init_confirm_frames: int = 1  # сильная гипотеза должна держаться столько кадров подряд, чтобы создать трек
+    init_confirm_dist_m: float = 15.0  # вес «слабых» детекций (motion) при выборе гипотезы  # классы, для которых в модели box используется только центр рамки  # стороны рамки у края кадра не используются (объект обрезан)
     anchor: str = "center"  # выходная точка: center | front | front_bottom | front_top | bottom | top (box: по размерам)
     out_offset_fwd_m: float = 0.0  # смещение выходной точки вдоль направления движения (по горизонтали)
     out_offset_up_m: float = 0.0  # и вверх (например, перёд/верх кабины вместо центра рамки)
@@ -348,6 +357,9 @@ class Tracker3D:
         self.heading = np.zeros(3)
         self._learn_dims = False
         self._reacq = None
+        self._cv_cache: dict = {}
+        self._heading_ok = False
+        self._confirm: list = []
         self.omega = 0.0
         self._prev_v = None
         self.front_samples: list = []
@@ -448,12 +460,59 @@ class Tracker3D:
         return since > c.lost_after_s * c.fps or (self.pos_sigma > c.lost_pos_std and since > c.fps)
 
     # --- измерения ---
+    def _is_primary(self, d: Detection) -> bool:
+        return bool(self.cfg.primary_sources) and d.source in self.cfg.primary_sources
+
+    def _point_of(self, d: Detection) -> np.ndarray:
+        if self.cfg.primary_sources and not self._is_primary(d):
+            return det_point(d, self.cfg.secondary_point)
+        return det_point(d, self.cfg.point)
+
+    def _offset_world(self, d: Detection) -> np.ndarray | None:
+        """Сдвиг измеряемой точки детекции относительно точки состояния (мир, м) или None."""
+        c = self.cfg
+        if not c.primary_sources or self._is_primary(d) or not any(c.secondary_offset):
+            return None
+        f = self.heading if self._heading_reliable() else np.zeros(3)
+        lft = np.array([-f[1], f[0], 0.0])
+        return f * c.secondary_offset[0] + lft * c.secondary_offset[1] + np.array([0, 0, 1.0]) * c.secondary_offset[2]
+
+    def _heading_reliable(self) -> bool:
+        """Курс известен: объект едет и скорость оценена уверенно (иначе — последний надёжный курс при остановке)."""
+        if self.x is None or self.P is None:
+            return False
+        vh = math.hypot(self.x[3], self.x[4])
+        if vh > 3.0 and math.sqrt(self.P[3, 3] + self.P[4, 4]) < 0.3 * vh:
+            self._heading_ok = True
+        elif vh > 3.0:
+            self._heading_ok = False
+        return self._heading_ok and np.linalg.norm(self.heading) > 0.5
+
+    def _cv(self, i: int, d: Detection, cams: list):
+        """Камера для детекции: при сдвиге o измеряется проекция (p + o) = камера с t' = t + R·o."""
+        o = self._offset_world(d)
+        if o is None:
+            return cams[i]
+        cam = cams[i]
+        key = (id(cam), round(float(o[0]), 4), round(float(o[1]), 4), round(float(o[2]), 4))
+        cv = self._cv_cache.get(key)
+        if cv is None:
+            from peleng.geometry import CameraModel
+            cv = CameraModel(cam.K, cam.dist, cam.size, cam.R, cam.t.reshape(3) + cam.R @ o, dict(cam.meta))
+            self._cv_cache[key] = cv
+        return cv
+
     def _det_weight(self, d: Detection) -> float:
         """Вес детекции при выборе гипотезы: пятна вычитания фона слабее детекций нейросети."""
         return self.cfg.weak_weight if d.cls in self.cfg.box_point_classes else 1.0
 
     def _sigma_px(self, d: Detection) -> float:
         c = self.cfg
+        if self._is_primary(d):
+            return c.px_sigma0 + c.px_sigma_rel_primary * d.size_px
+        if c.primary_sources and any(c.secondary_offset[:2]) and not self._heading_reliable():
+            # курс ещё неизвестен -> сдвиг запасной точки не применить: её неопределённость ~ размеру рамки
+            return c.px_sigma0 + (c.px_sigma_rel + 0.5) * d.size_px
         rel = c.px_sigma_rel_motion if d.cls == "motion" else c.px_sigma_rel
         return c.px_sigma0 + rel * d.size_px
 
@@ -613,7 +672,7 @@ class Tracker3D:
             for b in range(a + 1, m):
                 for ia, (_, uva, sa, da) in enumerate(cands[a]):
                     for ib, (_, uvb, sb, db) in enumerate(cands[b]):
-                        X, cov, errs = triangulate_ls([cams[a], cams[b]], [uva, uvb], [sa, sb])
+                        X, cov, errs = triangulate_ls([self._cv(a, da, cams), self._cv(b, db, cams)], [uva, uvb], [sa, sb])
                         if X is None:
                             continue
                         tol = [c.pair_reproj_px + c.pair_reproj_rel * d.size_px for d in (da, db)]
@@ -626,7 +685,7 @@ class Tracker3D:
                                 continue
                             best = None
                             for io, (_, uvo, so, do) in enumerate(cands[o]):
-                                h, _, z = project_jac(cams[o], X)
+                                h, _, z = project_jac(self._cv(o, do, cams), X)
                                 if z <= 0:
                                     continue
                                 e = float(np.linalg.norm(h - uvo))
@@ -640,7 +699,8 @@ class Tracker3D:
                         seen.add(key)
                         if len(views) > 2:
                             idx = sorted(views)
-                            X2, cov2, errs2 = triangulate_ls([cams[i] for i in idx], [cands[i][views[i]][1] for i in idx],
+                            X2, cov2, errs2 = triangulate_ls([self._cv(i, cands[i][views[i]][3], cams) for i in idx],
+                                                             [cands[i][views[i]][1] for i in idx],
                                                              [cands[i][views[i]][2] for i in idx], X0=X)
                             if X2 is not None:
                                 X, cov, errs = X2, cov2, errs2
@@ -689,9 +749,10 @@ class Tracker3D:
         self.frame = frame
         if self.x is not None:
             self.predict(dt)
+        self._cv_cache = {}
         all_cands = []
         for cam, dl in zip(cams, dets):
-            all_cands.append([(j, det_point(d, c.point), self._sigma_px(d), d) for j, d in enumerate(dl) if d.score >= c.min_score])
+            all_cands.append([(j, self._point_of(d), self._sigma_px(d), d) for j, d in enumerate(dl) if d.score >= c.min_score])
 
         lost = self._lost()
         mode, used, reproj = "predict" if self.x is not None else "none", [], float("nan")
@@ -704,11 +765,11 @@ class Tracker3D:
             for i, (cam, cl) in enumerate(zip(cams, all_cands)):
                 if not cl:
                     continue
-                h, J, z = project_jac(cam, self.x[:3])
-                if z <= 0.1:
-                    continue
                 for cand in cl:
                     _, uv, s, d = cand
+                    h, J, z = project_jac(self._cv(i, d, cams), self.x[:3])
+                    if z <= 0.1:
+                        continue
                     S = J @ Pp @ J.T + np.eye(2) * s * s
                     r = uv - h
                     d2 = float(r @ np.linalg.solve(S, r))
@@ -729,9 +790,22 @@ class Tracker3D:
             good.sort(key=lambda g: (-g[0], -g[1]))
             strong = good[0]
 
+        if lost and strong is not None and c.init_confirm_frames > 1:
+            # защита от ложного старта: гипотеза должна держаться несколько кадров подряд примерно на месте
+            if self._confirm and self._confirm[-1][0] == frame - 1 and \
+                    np.linalg.norm(strong[2] - self._confirm[-1][1]) < c.init_confirm_dist_m:
+                self._confirm.append((frame, strong[2]))
+            else:
+                self._confirm = [(frame, strong[2])]
+            if len(self._confirm) < c.init_confirm_frames:
+                strong_for_init = None
+            else:
+                strong_for_init = strong
+        else:
+            strong_for_init = strong
         if lost:
-            if strong is not None:
-                n, sc, X, cov, views, errs = strong
+            if strong_for_init is not None:
+                n, sc, X, cov, views, errs = strong_for_init
                 self._init(X, cov, frame, self.x[self.nk:].copy() if (self.box and self.x is not None) else None)
                 mode, used, reproj = "init", [cam_ids[i] for i, _ in views], float(np.mean(errs))
                 info["used_det"] = [(i, all_cands[i][j][0]) for i, j in views]
@@ -767,7 +841,8 @@ class Tracker3D:
                     best = None
             if best is not None:
                 _, X, cov, views, errs = best
-                self._update([(cams[i], gated[i][j][3], gated[i][j][1], gated[i][j][2]) for i, j in views])
+                self._update([(self._cv(i, gated[i][j][3], cams), gated[i][j][3], gated[i][j][1], gated[i][j][2])
+                              for i, j in views])
                 mode, used, reproj = "tri", [cam_ids[i] for i, _ in views], float(np.mean(errs))
                 info["used_det"] = [(i, gated[i][j][0]) for i, j in views]
                 self.last_update_frame = frame
@@ -794,18 +869,19 @@ class Tracker3D:
                             bestm = (key, i, g)
                 if bestm is not None:
                     _, i, g = bestm
+                    cv = self._cv(i, g[3], cams)
                     if self.box:
                         extra = None
-                        self._update([(cams[i], g[3], g[1], g[2])])
+                        self._update([(cv, g[3], g[1], g[2])])
                     else:
-                        extra = self._size_measure(cams[i], cam_ids[i], g[3]) if c.size_range else None
-                        self._iekf([(cams[i], g[1], g[2])], extra)
+                        extra = self._size_measure(cv, cam_ids[i], g[3]) if c.size_range else None
+                        self._iekf([(cv, g[1], g[2])], extra)
                     mode, used = "mono", [cam_ids[i]]
                     info["used_det"] = [(i, g[0])]
                     if extra and cam_ids[i] not in self.size_phys:
                         # глубина держится только на априорном размере объекта — это допущение, а не измерение
                         mode = "mono_size_prior"
-                    reproj = float(np.linalg.norm(project_jac(cams[i], self.x[:3])[0] - g[1]))
+                    reproj = float(np.linalg.norm(project_jac(cv, self.x[:3])[0] - g[1]))
                     self.last_update_frame = frame
                     if extra:
                         info["size_range"] = True
@@ -860,10 +936,11 @@ class Tracker3D:
         for i, j in views:
             d = cands[i][j][3]
             h_px = max(1.0, self._size_px(d))
-            z = float(cams[i].R[2] @ self.x[:3] + cams[i].t.reshape(3)[2])
+            cv = self._cv(i, d, cams)
+            z = float(cv.R[2] @ self.x[:3] + cv.t.reshape(3)[2])
             if z <= 0:
                 continue
-            Hm = h_px * z / cams[i].K[1, 1]
+            Hm = h_px * z / cv.K[1, 1]
             cid = cam_ids[i]
             self.size_learn_frame[cid] = self.frame
             if cid not in self.size_phys:
@@ -917,8 +994,8 @@ class Tracker3D:
         if best is None:
             return None
         _, i, j = best
-        cam = cams[i]
         _, uv, s, d = all_cands[i][j]
+        cam = self._cv(i, d, cams)
         Hm = self.size_phys.get(cam_ids[i])
         rel = c.size_range_rel_std
         if Hm is None:

@@ -166,8 +166,53 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def fuse_frames(parts: list, n: int, primary_sources, mode: str = "fallback", drop_border_px: float = 3.0) -> list:
+    """Слияние детекций нескольких детекторов по кадрам и камерам.
+
+    primary — детекции из primary_sources (например, поза грузовика с точкой pivot); рамка у края кадра у них
+    отбрасывается (ключевая точка может оказаться за кадром). mode="fallback": в камере берутся основные, если они
+    есть, иначе запасные; mode="all": все вместе."""
+    out = []
+    for k in range(n):
+        row = []
+        for i in range(len(parts[0][k])):
+            prim, sec = [], []
+            for fr in parts:
+                for d in fr[k][i]:
+                    (prim if d.source in primary_sources else sec).append(d)
+            if drop_border_px is not None and prim:
+                prim = [d for d in prim if d.bbox[0] > drop_border_px and d.bbox[1] > drop_border_px
+                        and d.bbox[2] < d.extra.get("img_w", 1920) - drop_border_px
+                        and d.bbox[3] < d.extra.get("img_h", 1080) - drop_border_px]
+            row.append(prim if (mode == "fallback" and prim) else prim + sec)
+        out.append(row)
+    return out
+
+
 def build_detector_frames(ds, spec: dict, n: int, out: Path, use_cache: bool):
-    """Детекции объекта по кадрам: из файла, из кэша или запуском детектора. Возвращает (frames, stats, config)."""
+    """Детекции объекта по кадрам: из файла, из кэша или запуском детектора (или нескольких — "detectors" +
+    слияние). Возвращает (frames, stats, config)."""
+    if spec.get("detectors"):
+        parts, stats, cfgs = [], [], []
+        for sub in spec["detectors"]:
+            sspec = {**spec, **sub}
+            sspec.pop("detectors", None)
+            try:
+                f, st, cf = build_detector_frames(ds, sspec, n, out, use_cache)
+            except Exception as e:  # noqa: BLE001 — нет весов и т. п.: работаем без этого детектора
+                if sub.get("optional"):
+                    print(f"детектор {sub.get('detector')} недоступен ({type(e).__name__}: {e}) — без него", flush=True)
+                    continue
+                raise
+            parts.append(f)
+            stats.append(st)
+            cfgs.append(cf)
+        if not parts:
+            raise RuntimeError("ни один детектор не доступен")
+        prim = tuple((spec.get("tracker") or {}).get("primary_sources", ()))
+        fu = spec.get("fusion") or {}
+        frames = fuse_frames(parts, n, prim, fu.get("mode", "fallback"), fu.get("drop_border_px", 3.0))
+        return frames, {"parts": stats}, {"parts": cfgs, "fusion": fu}
     from .basic_detectors import combine_dets, make_detector
     from .detect_stage import load_detections_file
 
