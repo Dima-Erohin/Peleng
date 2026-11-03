@@ -464,3 +464,39 @@ def test_road_in_viewer_and_disable():
 
     s = get_specs(["truck"], sets=["truck.road.enabled=false"])[0]
     assert s["road"]["enabled"] is False and get_specs(["drone"])[0].get("road") is None
+
+
+def test_fuse_frames_fallback_and_border():
+    """Слияние: основная (поза) детекция у края кадра отбрасывается; в камере без основной — запасная."""
+    from offline.run import fuse_frames
+
+    pose = [[[Detection((100, 100, 200, 150), (190, 120), 0.9, "truck", "truck_pose")],
+             [Detection((0, 100, 80, 150), (5, 120), 0.9, "truck", "truck_pose")]]]
+    base = [[[Detection((90, 95, 210, 160), (150, 127), 0.8, "truck", "truck")],
+             [Detection((0, 95, 90, 160), (45, 127), 0.8, "truck", "truck")]]]
+    fr = fuse_frames([pose, base], 1, ("truck_pose",), "fallback", 3.0)
+    assert [d.source for d in fr[0][0]] == ["truck_pose"]
+    assert [d.source for d in fr[0][1]] == ["truck"]
+
+
+def test_secondary_offset_measurement():
+    """Запасная точка со сдвигом относительно состояния: трек pivot по центрам рамок с известным сдвигом точен."""
+    T = truth_traj(200)
+    center = world_to_ue(T.mean(0))
+    cams = [look_at_ue(loc, center, f) for loc, _, f in CAMS_UE]
+    rng = np.random.default_rng(2)
+    frames = []
+    for k in range(200):
+        v = T[min(k + 1, 199)] - T[max(k - 1, 0)]
+        f = np.array([v[0], v[1], 0.0]) / np.linalg.norm(v[:2])
+        Cn = T[k] - 8.0 * f  # центр на 8 м позади pivot
+        row = []
+        for cam in cams:
+            uv = cam.project(Cn)[0] + rng.normal(0, 1.0, 2)
+            s = cam.K[0, 0] * 5.0 / cam.depth(Cn)[0]
+            row.append([Detection((uv[0] - s, uv[1] - s / 2, uv[0] + s, uv[1] + s / 2), tuple(uv), 0.8, "truck", "truck")])
+        frames.append(row)
+    cfg = TrackerConfig(fps=FPS, primary_sources=("truck_pose",), secondary_offset=(-8.0, 0.0, 0.0))
+    E, _ = track_frames(cams, frames, cfg)
+    err = np.linalg.norm(E - T, axis=1)
+    assert np.sqrt(np.nanmean(err[60:] ** 2)) < 1.5
