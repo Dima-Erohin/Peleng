@@ -36,8 +36,11 @@ PRESETS: dict[str, dict] = {
         # σ ускорения 7 м/с² по горизонтали — компенсирует манёвры и «дрожание» центра рамки (подобрано на
         # тестовом наборе: 3 -> 11.6 м RMSE, 5 -> 9.8, 7 -> 8.7, 10 -> 9.2); по вертикали — 0.5 (наземная машина).
         "tracker": {"model": "cv", "accel_std": 7.0, "accel_std_z": 0.5, "point": "center", "meas": "point",
-                    "anchor": "front", "size_range": True, "px_sigma_rel": 0.15},
-        "roi": None,
+                    "anchor": "front", "size_range": True, "px_sigma_rel": 0.15, "dims_mode": "median_L",
+                    "size_rel_min": 0.04, "size_rel_growth": 0.01},
+        # если TruckDetector в камере ничего не нашёл — сильная YOLO в окне вокруг причинного прогноза трекера
+        "roi": {"weights": "yolo11m.pt", "imgsz": 640, "conf": 0.15, "classes": ["truck", "car", "bus"],
+                "only_if_empty": True},
         "truth": True,
         "fill_before_init": "first",
     },

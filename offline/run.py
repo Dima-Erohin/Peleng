@@ -44,7 +44,8 @@ class _Single:
         return 1
 
 
-def track(ds, frames: list, cfg: TrackerConfig, n: int, refiner=None, log=print, multi: int = 0):
+def track(ds, frames: list, cfg: TrackerConfig, n: int, refiner=None, log=print, multi: int = 0,
+          refiner_only_if_empty: bool = False):
     """Причинный трекинг: кадр за кадром, выход кадра k зависит только от детекций кадров <= k.
 
     refiner (RoiRefiner) — сильный детектор в окне вокруг прогноза трекера (прогноз — по кадрам < k).
@@ -74,7 +75,9 @@ def track(ds, frames: list, cfg: TrackerConfig, n: int, refiner=None, log=print,
             for i, (cam, img) in enumerate(zip(cams, imgs)):
                 base = frames[k][i]
                 wins = [refiner.window(r[i], cam.size) for r in regs if r[i] is not None]
-                if lost or multi > 0:
+                if refiner_only_if_empty and base:
+                    wins = []  # основной детектор уже нашёл объект в этой камере — окно не нужно
+                elif lost or multi > 0:
                     # трек потерян (или ищем новые объекты): окна вокруг лучших кандидатов базового детектора
                     for d in sorted(base, key=lambda d: -d.score)[:1]:
                         if d.score >= 0.25:
@@ -205,7 +208,8 @@ def run_object(ds, spec: dict, n: int, out_root: Path, a) -> dict:
                              conf=r.get("conf", 0.1),
                              cache_path=out / f"roi_cache_{Path(r.get('weights', 'yolo11m.pt')).stem}_{r.get('imgsz', 640)}.json")
     res, _, used, all_tracks = track(ds, frames, cfg, n, refiner, log=lambda m: print(m, flush=True),
-                                     multi=int(spec.get("multi", 0)))
+                                     multi=int(spec.get("multi", 0)),
+                                     refiner_only_if_empty=bool((spec.get("roi") or {}).get("only_if_empty", False)))
     t_trk = time.time()
     (out / "detections_used.json").write_text(json.dumps({
         "note": "детекции, поданные в трекер, frames[k][i] -> камера cams[i]",

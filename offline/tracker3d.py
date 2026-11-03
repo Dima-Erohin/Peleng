@@ -66,6 +66,8 @@ class TrackerConfig:
     object_size_rel_std: float = 0.5  # относительная σ дальности по априорному размеру
     mono_init: bool = True  # создавать трек по одной камере (только если задан object_size_m)
     size_learn_alpha: float = 0.1
+    size_rel_min: float = 0.04  # σ дальности по выученному размеру сразу после обучения (доля дальности)
+    size_rel_growth: float | None = None  # рост σ в секунду с последнего обучения (None — постоянная size_range_rel_std)
     iekf_iters: int = 5
     max_speed: float = 60.0  # м/с — физическое ограничение скорости (защита от расхождения фильтра)
     # модель измерения: "point" — точка рамки (центр), "box" — все 4 стороны рамки как проекция 3D-параллелепипеда
@@ -74,7 +76,15 @@ class TrackerConfig:
     meas: str = "point"
     box_prior: tuple = (6.0, 2.5, 3.0)  # априорные длина/ширина/высота (м)
     box_prior_std: float = 4.0
-    dims_prior_std: tuple = (10.0, 10.0, 10.0)  # σ априорных L/W/H для DimsEstimator (anchor=front в режиме point)
+    dims_prior_std: tuple = (10.0, 10.0, 10.0)
+    # откуда брать смещение «перёд» (anchor=front): "dims" — L/2 по оценке размеров (DimsEstimator);
+    # "detector_point" — медиана (точка детектора, триангулированная по >=2 камерам) − центр, вдоль курса и по высоте
+    front_source: str = "dims"
+    # оценка размеров: "lsq" — робастный МНК L/W/H по всем сторонам рамок; "median_L" — медиана оценок длины
+    # по ширине рамки в видах «сбоку» (W/H — априорные box_prior)
+    dims_mode: str = "lsq"
+    size_from_dims: bool = False  # дальность по одной камере — по ожидаемой рамке параллелепипеда (учитывает ракурс)
+    front_min_samples: int = 10  # σ априорных L/W/H для DimsEstimator (anchor=front в режиме point)
     box_dims_walk: float = 0.003  # σ случайного блуждания размеров за кадр, м
     box_side_sigma0: float = 2.0  # σ стороны рамки = sigma0 + rel * размер рамки
     box_side_sigma_rel: float = 0.05
@@ -192,7 +202,8 @@ class DimsEstimator:
     по сторонам рамок: сторона = min/max проекций 8 вершин. Используются только прошлые кадры — причинно.
     Стороны рамок у края кадра (объект обрезан) не используются; пятна вычитания фона — тоже (тень, «след»)."""
 
-    def __init__(self, prior=(6.0, 2.5, 3.0), prior_std=10.0, max_obs=200, every=10, border=3.0, side_sigma=(2.0, 0.05)):
+    def __init__(self, prior=(6.0, 2.5, 3.0), prior_std=10.0, max_obs=200, every=10, border=3.0, side_sigma=(2.0, 0.05),
+                 mode: str = "lsq"):
         self.dims = np.array(prior, dtype=float)
         self.prior = np.array(prior, dtype=float)
         self.prior_std = np.broadcast_to(np.asarray(prior_std, dtype=float), (3,)).copy()
@@ -203,6 +214,9 @@ class DimsEstimator:
         self.side_sigma = side_sigma
         self._since = 0
         self.n_solves = 0
+        self.mode = mode
+        self.min_side_sin = 0.5
+        self.L_samples: list = []
 
     @staticmethod
     def box_bbox(cam, p, f, dims):
@@ -224,6 +238,9 @@ class DimsEstimator:
         if ok.sum() < 2:
             return
         s = self.side_sigma[0] + self.side_sigma[1] * d.size_px
+        if self.mode == "median_L":
+            self._add_L_sample(cam, b, ok, np.array(p, float), np.array(f, float))
+            return
         self.obs.append((cam, b, ok, np.array(p, float), np.array(f, float), s))
         if len(self.obs) > self.max_obs:
             self.obs.pop(0)
@@ -231,6 +248,41 @@ class DimsEstimator:
         if self._since >= self.every:
             self._since = 0
             self.solve()
+
+    def _add_L_sample(self, cam, b, ok, p, f) -> None:
+        """Одна оценка длины L по ширине рамки (стороны x1, x2 не обрезаны), W и H — априорные.
+        Берутся только виды «сбоку» (луч камеры заметно поперёк курса), иначе L по ширине не определяется."""
+        if not (ok[0] and ok[2]):
+            return
+        ray = p - cam.center
+        ray[2] = 0.0
+        nr = np.linalg.norm(ray)
+        if nr < 1e-6 or abs(np.cross(ray / nr, f)[2]) < self.min_side_sin:
+            return
+        w_obs = b[2] - b[0]
+
+        def width(L):
+            h = self.box_bbox(cam, p, f, (L, self.prior[1], self.prior[2]))
+            return None if h is None else h[2] - h[0]
+
+        lo, hi = 0.5, 40.0
+        wl, wh = width(lo), width(hi)
+        if wl is None or wh is None or not (wl <= w_obs <= wh):
+            return
+        for _ in range(30):
+            mid = 0.5 * (lo + hi)
+            wm = width(mid)
+            if wm is None:
+                return
+            if wm < w_obs:
+                lo = mid
+            else:
+                hi = mid
+        self.L_samples.append(0.5 * (lo + hi))
+        if len(self.L_samples) > 3000:
+            self.L_samples.pop(0)
+        if len(self.L_samples) >= 10:
+            self.dims[0] = float(np.median(self.L_samples))
 
     def solve(self, iters: int = 4) -> None:
         if len(self.obs) < 10:
@@ -283,7 +335,9 @@ class Tracker3D:
         self.heading = np.zeros(3)
         self._learn_dims = False
         self._reacq = None
-        self.dims_est = DimsEstimator(self.cfg.box_prior, self.cfg.dims_prior_std) if (not self.box and self.cfg.anchor != "center") else None
+        self.front_samples: list = []
+        self.size_learn_frame: dict[int, int] = {}
+        self.dims_est = DimsEstimator(self.cfg.box_prior, self.cfg.dims_prior_std, mode=self.cfg.dims_mode) if (not self.box and self.cfg.anchor != "center") else None
 
     # --- модель движения ---
     def _FQ(self, dt: float):
@@ -687,6 +741,9 @@ class Tracker3D:
                             d = gated[i][j][3]
                             if d.cls not in c.box_point_classes and d.score >= 0.3:
                                 self.dims_est.add(cams[i], d, self.x[:3], f)
+                        if c.front_source == "detector_point":
+                            self._learn_front_offset(cams, [gated[i][j][3] for i, j in views],
+                                                     [gated[i][j][2] for i, j in views], [i for i, _ in views], f)
             else:
                 # одна камера: лучшая по Махаланобису детекция (с учётом score)
                 bestm = None
@@ -767,6 +824,7 @@ class Tracker3D:
                 continue
             Hm = h_px * z / cams[i].K[1, 1]
             cid = cam_ids[i]
+            self.size_learn_frame[cid] = self.frame
             if cid not in self.size_phys:
                 # с априорным размером начинаем с него: одна неудачная триангуляция не испортит оценку
                 if self.cfg.object_size_m is not None:
@@ -775,6 +833,24 @@ class Tracker3D:
                     self.size_phys[cid] = Hm
             else:
                 self.size_phys[cid] = (1 - a) * self.size_phys[cid] + a * Hm
+
+    def _learn_front_offset(self, cams, dets, sig, idx, f) -> None:
+        """Смещение «перёд» относительно центра (вдоль курса и по высоте) по точкам, которые дал детектор
+        (например, перёд кабины по маске), триангулированным по >= 2 камерам. Копится медиана — причинно."""
+        X, _, errs = triangulate_ls([cams[i] for i in idx], [np.asarray(d.point_px, float) for d in dets], list(sig))
+        if X is None or errs.max() > self.cfg.pair_reproj_px + self.cfg.pair_reproj_rel * max(d.size_px for d in dets):
+            return
+        dv = X - self.x[:3]
+        self.front_samples.append((float(dv[:2] @ f[:2]), float(dv[2])))
+        if len(self.front_samples) > 2000:
+            self.front_samples.pop(0)
+
+    def front_offset(self):
+        """(вперёд, вверх) в метрах или None, если наблюдений мало."""
+        if len(self.front_samples) < self.cfg.front_min_samples:
+            return None
+        a = np.array(self.front_samples)
+        return float(np.median(a[:, 0])), float(np.median(a[:, 1]))
 
     def _size_px(self, d: Detection) -> float:
         """Размер рамки (px) по выбранному измерению: высота / ширина / среднее геометрическое."""
@@ -815,10 +891,44 @@ class Tracker3D:
         cov = np.eye(3) * sp ** 2 + np.outer(dvec, dvec) * (sr ** 2 - sp ** 2)
         return i, j, X, cov
 
+    def _size_measure_box(self, cam, d: Detection):
+        c = self.cfg
+        if not c.size_from_dims or self.dims_est is None or len(self.dims_est.L_samples) < 10 \
+                or np.linalg.norm(self.heading) < 0.5:
+            return None
+        W, H = cam.size
+        b = d.bbox
+        if b[0] <= 3 or b[1] <= 3 or b[2] >= W - 3 or b[3] >= H - 3:
+            return None  # рамка обрезана краем кадра
+        hb = DimsEstimator.box_bbox(cam, self.x[:3], self.heading, self.dims_est.dims)
+        if hb is None:
+            return None
+        s_pred = math.sqrt(max(hb[2] - hb[0], 1e-3) * max(hb[3] - hb[1], 1e-3))
+        s_obs = math.sqrt(max(b[2] - b[0], 1e-3) * max(b[3] - b[1], 1e-3))
+        zp = float(cam.R[2] @ self.x[:3] + cam.t.reshape(3)[2])
+        zm = zp * s_pred / s_obs
+        s = c.size_range_rel_std * zm
+        varp = float(cam.R[2] @ self.P[:3, :3] @ cam.R[2])
+        if (zm - zp) ** 2 / (varp + s * s) > CHI2_2:
+            return None
+        return [(cam.R[2].copy(), zm - float(cam.t.reshape(3)[2]), s)]
+
     def _size_measure(self, cam, cid: int, d: Detection):
-        """Линейное измерение глубины (ось z камеры) по высоте рамки: z = f·H/h_px."""
+        """Линейное измерение глубины (ось z камеры) по размеру рамки.
+
+        Если известны размеры объекта (DimsEstimator) и курс — ожидаемая рамка параллелепипеда на прогнозной
+        глубине сравнивается с наблюдаемой: z = z_прогн · s_ожид / s_набл (s — среднее геометрическое сторон);
+        это учитывает поворот объекта относительно камеры. Иначе — z = f·H/h_px (H выучен для камеры или априорный)."""
+        box_z = self._size_measure_box(cam, d)
+        if box_z is not None:
+            return box_z
         Hm = self.size_phys.get(cid)
         rel = self.cfg.size_range_rel_std
+        if Hm is not None and self.cfg.size_rel_growth is not None:
+            # размер выучен по этой камере, пока объект был виден >= 2 камерами: сразу после этого он точен
+            # (тот же ракурс), дальше ракурс меняется — σ растёт со временем с последнего обучения
+            dt = (self.frame - self.size_learn_frame.get(cid, self.frame)) / self.cfg.fps
+            rel = min(self.cfg.size_range_rel_std, self.cfg.size_rel_min + self.cfg.size_rel_growth * dt)
         if Hm is None:
             if self.cfg.object_size_m is None:
                 return None
@@ -845,7 +955,11 @@ class Tracker3D:
         nv = np.linalg.norm(vh)
         if nv > 1.0:  # курс по горизонтальной скорости; при остановке держим последний
             self.heading = vh / nv
-        if c.anchor != "center" and (self.box or self.dims_est is not None):
+        fo = self.front_offset() if (c.anchor == "front" and c.front_source == "detector_point") else None
+        if fo is not None:
+            p = p + self.heading * fo[0]
+            p[2] += fo[1]
+        elif c.anchor != "center" and (self.box or self.dims_est is not None):
             dims = self.x[self.nk:self.nk + 3] if self.box else self.dims_est.dims
             L, Wd, Hd = np.maximum(dims, 0.0)
             if c.anchor.startswith("front"):
