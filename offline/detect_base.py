@@ -15,7 +15,8 @@
   * extra — произвольные данные (сохраняются в кэш, если сериализуемы в JSON). Ключевые точки — в
     extra["kp"] = {"имя": [u, v, conf]}; трекер с point="kp:имя" измеряет именно эту точку (например,
     point="kp:pivot" для детектора позы грузовика; понимается и extra["pivot"] = (u, v) + extra["kp_conf"]),
-    а при её отсутствии — point_px.
+    а при её отсутствии — point_px. Явно переданная, но ненадёжная ключевая точка
+    отбрасывается через point_is_reliable, а не заменяется на point_px.
   * score в [0, 1]; cls — строка ("truck", "drone", "motion", ...); source — имя детектора.
   * camera_model — модель камеры на этот кадр (рабочая система координат, см. ue_data.py); может
     пригодиться, например, для компенсации поворота камеры.
@@ -71,9 +72,21 @@ class Detection:
                 v = [v[0], v[1], ex["kp_conf"]]
         if v is None or len(v) < 2:
             return None
-        if len(v) > 2 and v[2] is not None and float(v[2]) < 0.3:
+        if not np.isfinite(np.asarray(v[:2], dtype=float)).all():
+            return None
+        if len(v) > 2 and v[2] is not None and (not np.isfinite(float(v[2])) or float(v[2]) < 0.3):
             return None
         return float(v[0]), float(v[1])
+
+    def point_is_reliable(self, mode: str) -> bool:
+        """Отсутствующую keypoint можно заменить point_px, явно отвергнутую — нельзя."""
+        if mode.startswith("kp:"):
+            name = mode[3:]
+            kp = self.extra.get("kp")
+            supplied = name in self.extra or (isinstance(kp, dict) and name in kp)
+            if supplied:
+                return self.keypoint(name) is not None
+        return bool(np.isfinite(self.point_px).all())
 
 
 def _jsonable(x):

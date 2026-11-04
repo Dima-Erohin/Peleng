@@ -203,6 +203,12 @@ export async function loadDemo(signal) {
     if (signal?.aborted) throw error;
     return null;
   });
+  const observationsResponse = await fetch(`${base}estimate/truck_observations.json`, { signal });
+  if (!observationsResponse.ok && observationsResponse.status !== 404) {
+    throw new Error(`Наблюдения грузовика: HTTP ${observationsResponse.status}`);
+  }
+  const truckObservations = observationsResponse.ok ? parseTruckObservations(await observationsResponse.json()) : null;
+  if (truckObservations) truckObservations.trajectoryMatches = await observationsMatchTrajectory(truckObservations, estimateText);
   const cameras = cameraTexts.map((text, index) => {
     const rows = text.trim().split(/\r?\n/);
     const samples = rows.slice(1).map((row) => {
@@ -216,7 +222,7 @@ export async function loadDemo(signal) {
       rotations, focal: Number(rows[0].split(";").at(-1)), sensorWidth: 23.76, sensorHeight: 13.365, name: `Камера ${index + 1}`,
     };
   });
-  return createDataset(
+  return { ...createDataset(
     [
       { ...parseTrajectoryCsv(object, { id: "truck-1", name: "Cargo Truck · 01" }), kind: "truck", source: "reference" },
       ...(estimateText ? [{ ...parseTrajectoryCsv(estimateText, { id: "truck-est", name: "Peleng · оценка" }), kind: "truck", source: "estimate" }] : []),
@@ -226,6 +232,7 @@ export async function loadDemo(signal) {
       dataQuality: JSON.parse(reportText),
       clips: cameras.map((camera, i) => ({ id: camera.id, name: camera.name, url: `${base}Way1.FinalImage.CineCameraActor${i + 1}.mp4` })),
     },
-  );
+  ), truckObservations };
 }
 import { parseImageTrack } from "./image-tracks.js";
+import { parseTruckObservations, observationsMatchTrajectory } from "./observations.js";

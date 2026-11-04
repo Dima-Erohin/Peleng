@@ -5,6 +5,7 @@ import { mergeGeometries } from "three/addons/utils/BufferGeometryUtils.js";
 import { advancePlayback, sampleTrack } from "./data.js";
 import { observationRays } from "./reconstruction.js";
 import { createDroneModel } from "./drone-model.js";
+import { smoothTruckTrack } from "./truck-motion.js";
 
 function disposeTree(root) {
   const geometries = new Set(), materials = new Set(), textures = new Set();
@@ -76,7 +77,7 @@ function buildTrail(track) {
     }
     endIndices[i] = values.length / 3;
   }
-  const route = lineSegments(values, track.color, 0.18);
+  const route = lineSegments(values, track.color, 0.55);
   const travelled = new THREE.LineSegments(route.geometry, new THREE.LineBasicMaterial({ color: track.color }));
   travelled.frustumCulled = false;
   travelled.geometry = route.geometry.clone();
@@ -258,9 +259,10 @@ export class TrajectoryScene {
     const ring = new THREE.Mesh(new THREE.RingGeometry(ringRadius - 0.04, ringRadius, 40), new THREE.MeshBasicMaterial({ color: track.color, side: THREE.DoubleSide, transparent: true }));
     ring.position.z = track.kind === "drone" ? -0.35 : -1.25;
     group.add(ring);
-    const trail = buildTrail(track);
+    const motionTrack = track.kind === "truck" && track.source === "estimate" ? smoothTruckTrack(track) : track;
+    const trail = buildTrail(motionTrack);
     this.content.add(group, trail.route, trail.travelled, trail.tip);
-    const object = { track, group, ring, ...trail, sample: {}, heading: null, enabled: true };
+    const object = { track, motionTrack, group, ring, ...trail, sample: {}, heading: null, enabled: true };
     if (track.kind === "drone") {
       object.model = createDroneModel(track.color);
       group.add(object.model);
@@ -278,7 +280,7 @@ export class TrajectoryScene {
     const old = track && this.objects.get(track.id);
     if (old) {
       for (const line of [old.route, old.travelled, old.tip]) { this.content.remove(line); line.geometry.dispose(); line.material.dispose(); }
-      Object.assign(old, buildTrail(track), { track });
+      Object.assign(old, buildTrail(track), { track, motionTrack: track });
       this.content.add(old.route, old.travelled, old.tip);
     } else if (track) {
       const object = this.createObject(track);
@@ -292,7 +294,7 @@ export class TrajectoryScene {
       }
     }
     this.liveTrack = track ? track.id : null;
-    this.dirtyPose = true;
+    this.dirtyPose ||= !old;
     this.needsRender = true;
   }
 
@@ -362,6 +364,10 @@ export class TrajectoryScene {
   focus(overview = false) {
     if (!this.dataset) return;
     this.needsRender = true;
+    // Flush pending orbit/pan deltas before placing the camera explicitly.
+    this.controls.enableDamping = false;
+    this.controls.update();
+    this.controls.enableDamping = true;
     if (overview) {
       const { min, max } = this.dataset.bounds;
       this.controls.target.set((min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2);
@@ -389,7 +395,7 @@ export class TrajectoryScene {
         this.controls.update();
         return;
       }
-      const p = sampleTrack(object.track, this.time, object.sample);
+      const p = sampleTrack(object.motionTrack, this.time, object.sample);
       this.controls.target.set(p.x, p.y, p.z);
       const distance = object.track.kind === "drone" ? 0.18 : 1;
       this.camera.position.set(p.x - 24 * distance, p.y - 34 * distance, p.z + 24 * distance);
@@ -400,7 +406,7 @@ export class TrajectoryScene {
 
   updateObjects(dt) {
     for (const object of this.objects.values()) {
-      const p = sampleTrack(object.track, this.time, object.sample);
+      const p = sampleTrack(object.motionTrack, this.time, object.sample);
       if (object.track.live) {
         const last = object.track.times.at(-1), ahead = this.time - last;
         if (ahead > 0 && ahead < 3) {
@@ -415,7 +421,10 @@ export class TrajectoryScene {
       object.group.visible = p.visible && object.enabled;
       object.route.visible = object.enabled && this.showRoute;
       object.travelled.visible = object.tip.visible = object.enabled;
-      object.group.position.set(p.x, p.y, p.z);
+      if (object.track.live && !this.dirtyPose && dt > 0) {
+        object.group.position.lerp(this.temp.set(p.x, p.y, p.z), 1 - Math.exp(-dt / 0.12));
+        p.x = object.group.position.x; p.y = object.group.position.y; p.z = object.group.position.z;
+      } else object.group.position.set(p.x, p.y, p.z);
       if (this.dirtyPose || object.heading == null) object.heading = p.heading;
       else if (p.speed > 0.01) {
         const angle = Math.atan2(Math.sin(p.heading - object.heading), Math.cos(p.heading - object.heading));
@@ -426,7 +435,7 @@ export class TrajectoryScene {
       object.travelled.geometry.setDrawRange(0, object.endIndices[p.index] || 0);
       const offset = p.index * 3;
       const a = object.tip.geometry.attributes.position;
-      a.setXYZ(0, object.track.positions[offset], object.track.positions[offset + 1], object.track.positions[offset + 2]);
+      a.setXYZ(0, object.motionTrack.positions[offset], object.motionTrack.positions[offset + 1], object.motionTrack.positions[offset + 2]);
       a.setXYZ(1, p.x, p.y, p.z);
       a.needsUpdate = true;
       object.tip.visible = object.enabled && p.visible;
@@ -473,7 +482,8 @@ export class TrajectoryScene {
     const object = this.objects.get(this.selected);
     const reconstruction = this.dataset?.reconstructions?.find((item) => item.id === this.selected);
     const frame = reconstruction?.frames[Math.round(this.time * reconstruction.fps)];
-    const sample = object ? { ...object.sample } : frame?.position ? {
+    const sample = object ? object.track.source === "estimate"
+      ? { ...sampleTrack(object.track, this.time) } : { ...object.sample } : frame?.position ? {
       x: frame.position[0], y: frame.position[1], z: frame.position[2],
       visible: true, speed: 0, distance: 0, motionAvailable: false,
     } : null;

@@ -1,8 +1,13 @@
 import React, { useEffect, useRef, useState } from "react";
 import { timecode } from "./PlaybackControls";
 import ImageTrackOverlay from "./ImageTrackOverlay";
+import TruckVideoOverlay from "./TruckVideoOverlay";
+import { observationAt } from "../../trajectory/observations.js";
 
-export default function CameraVideo({ clips, imageTracks = [], time, playing, rate, active }) {
+export default function CameraVideo({ clips, imageTracks = [], time: timelineTime, playing: timelinePlaying, rate, active, observations, onlinePoint, online = false, onlineInfo }) {
+  const time = online ? onlinePoint?.t ?? 0 : timelineTime;
+  const playing = !online && timelinePlaying;
+  const truckPoint = online ? onlinePoint : observationAt(observations?.points || [], time);
   const [selectedId, setSelectedId] = useState(clips[0]?.id);
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
@@ -11,6 +16,8 @@ export default function CameraVideo({ clips, imageTracks = [], time, playing, ra
   const currentTime = useRef(time);
   currentTime.current = time;
   const selected = clips.find((clip) => clip.id === selectedId) || clips[0];
+  const cameraIndex = (online ? onlineInfo : observations)?.cams?.findIndex((id) => selected?.id === `cam-${id}`) ?? -1;
+  const dimensions = (online ? onlineInfo : observations)?.sizes?.[cameraIndex] || [1920, 1080];
   const selectedTracks = imageTracks.filter((track) => track.camera_id === selected?.id);
   useEffect(() => {
     setError("");
@@ -51,7 +58,7 @@ export default function CameraVideo({ clips, imageTracks = [], time, playing, ra
   return (
     <section className="replay-video-panel" aria-label="Контрольное видео">
       <div className="replay-video-heading">
-        <span>КОНТРОЛЬНОЕ ВИДЕО</span><span>{timecode(time)} <i>SYNC</i></span>
+        <span>{online ? "ОБРАБОТАННЫЙ КАДР" : "КОНТРОЛЬНОЕ ВИДЕО"}</span><span>{timecode(time)} <i>SYNC</i></span>
       </div>
       {selected ? (
         <>
@@ -63,8 +70,12 @@ export default function CameraVideo({ clips, imageTracks = [], time, playing, ra
               aria-label={selected.name}
             />
             <span className="video-camera-label">{selected.name}</span>
+            {(observations || online) && <TruckVideoOverlay point={truckPoint}
+              trajectoryMatches={online || observations?.trajectoryMatches}
+              cameraIndex={cameraIndex} videoRef={videoRef} ready={ready}
+              fps={onlineInfo?.fps || observations?.fps || 30} width={dimensions[0]} height={dimensions[1]} />}
             {selectedTracks.map((track, index) => <ImageTrackOverlay key={track.object_id} track={track}
-              videoRef={videoRef} time={time} ready={ready} statusIndex={index} />)}
+              videoRef={videoRef} time={time} ready={ready} statusIndex={index + (observations || online ? 1 : 0)} />)}
             <button type="button" className="video-expand" aria-label="Развернуть контрольное видео"
               onClick={() => {
                 if (!frameRef.current?.requestFullscreen) { setError("Полноэкранный режим недоступен в этом браузере"); return; }

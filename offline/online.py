@@ -181,7 +181,7 @@ class OnlineSession:
                     break
                 continue
             k = min(ks)
-            imgs = [g[1] for g in got]
+            imgs = [image if frame == k else None for frame, image in got]
             t_start = self.t0 + k / ds.fps  # момент «съёмки» кадра — от него считаем задержку
             t_proc = time.time()
             cams = [c.model(k) for c in ds.cameras]
@@ -189,7 +189,9 @@ class OnlineSession:
             t_det = time.time()
             r = tracker.step(k, cams, row, ids)
             msg = {"type": "point", "session": self.id, "frame": k, "t": k / ds.fps, "mode": r.mode,
+                   "limited_update": bool(r.info.get("limited_update")),
                    "n_cams": int(r.n_cams), "cams": [int(c) for c in (r.cams or [])],
+                   "used_det": r.info.get("used_det", []),
                    "proc_ms": round((time.time() - t_proc) * 1000), "detect_ms": round((t_det - t_proc) * 1000),
                    "lag_ms": round((time.time() - t_start) * 1000),
                    "dets": [[[round(v, 1) for v in d.bbox] + [round(d.score, 2), d.source] for d in cam] for cam in row]}
@@ -255,7 +257,8 @@ class OnlineEngine:
         for i, (cam, img) in enumerate(zip(cams, imgs)):
             W, H = cam.size
             b = self.drop_border
-            prim = [d for d in pose[i] if d.bbox[0] > b and d.bbox[1] > b and d.bbox[2] < W - b and d.bbox[3] < H - b]
+            prim = [d for d in pose[i] if d.point_is_reliable(tracker.cfg.point)
+                    and d.bbox[0] > b and d.bbox[1] > b and d.bbox[2] < W - b and d.bbox[3] < H - b]
             row.append(prim)
             if not prim and img is not None and regs is not None and regs[i] is not None:
                 need.append(i)
@@ -281,6 +284,7 @@ class OnlineEngine:
         s = self.session
         ds = self.ds
         return {"type": "hello", "server_time": time.time(), "fps": ds.fps, "n_frames": ds.n_frames,
+                "sizes": [list(c.model(0).size) for c in ds.cameras],
                 "cams": [c.cam_id for c in ds.cameras], "device": self.device, "weights": Path(self.weights).name,
                 "fallback": "roi" if self.refiner else "none",
                 "session": s.id if s else None, "t0": s.t0 if s else None, "done": s.done if s else None,

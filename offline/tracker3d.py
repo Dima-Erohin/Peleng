@@ -353,6 +353,10 @@ class Tracker3D:
         self.frame = -1
         self._prev_frame = -1
         self.reinit_count = 0
+        self._reinit_candidate = None
+        self._step_origin = None
+        self._step_dt = 0.0
+        self._limited_update = False
         self.size_phys: dict[int, float] = {}  # cam_id -> физическая высота объекта (м) по рамке этой камеры
         self.history: list[FrameResult] = []
         self.heading = np.zeros(3)
@@ -444,6 +448,8 @@ class Tracker3D:
         self.P = P
         self.last_update_frame = frame
         self.reinit_count = 0
+        self._reinit_candidate = None
+        self._limited_update = False
 
     @property
     def pos_sigma(self) -> float:
@@ -654,6 +660,21 @@ class Tracker3D:
                 xi = xn
                 break
             xi = xn
+        if self._step_origin is not None and self._step_dt > 0:
+            limit = self.cfg.max_speed * self._step_dt
+            if np.linalg.norm(xi[:3] - self._step_origin) > limit:
+                # Limit the position correction too, not just the velocity stored in the state.
+                correction = xi[:3] - x0[:3]
+                predicted = x0[:3] - self._step_origin
+                a = float(correction @ correction)
+                b = 2 * float(predicted @ correction)
+                c = float(predicted @ predicted) - limit ** 2
+                scale = 0.0
+                if a > 1e-12:
+                    scale = float(np.clip((-b + math.sqrt(max(0.0, b * b - 4 * a * c))) / (2 * a), 0, 1))
+                xi = x0 + scale * (xi - x0)
+                Kg *= scale
+                self._limited_update = True
         I_KH = np.eye(n) - Kg @ H
         self.x = xi
         sp = float(np.linalg.norm(self.x[3:6]))
@@ -749,6 +770,9 @@ class Tracker3D:
         # шаг по времени — по номерам кадров: онлайн-режим обрабатывает не каждый кадр (offline/online.py)
         prev = self.frame
         dt = (frame - prev) / c.fps if prev >= 0 else 0.0
+        self._step_origin = self.x[:3].copy() if self.x is not None else None
+        self._step_dt = dt
+        self._limited_update = False
         self._prev_frame = prev
         self.frame = frame
         if self.x is not None:
@@ -756,7 +780,11 @@ class Tracker3D:
         self._cv_cache = {}
         all_cands = []
         for cam, dl in zip(cams, dets):
-            all_cands.append([(j, self._point_of(d), self._sigma_px(d), d) for j, d in enumerate(dl) if d.score >= c.min_score])
+            all_cands.append([
+                (j, self._point_of(d), self._sigma_px(d), d) for j, d in enumerate(dl)
+                if d.score >= c.min_score and d.point_is_reliable(
+                    c.secondary_point if c.primary_sources and not self._is_primary(d) else c.point)
+            ])
 
         lost = self._lost()
         mode, used, reproj = "predict" if self.x is not None else "none", [], float("nan")
@@ -895,9 +923,15 @@ class Tracker3D:
                 r = X - self.x[:3]
                 d3 = float(r @ np.linalg.solve(self.P[:3, :3] + strong[3], r))
                 if d3 > c.gate3_chi2 and (mode != "tri" or len(used) < strong[0]):
-                    self.reinit_count += 1
+                    prior = self._reinit_candidate
+                    # Several unrelated outliers must not count as one persistent new track.
+                    consistent = prior is not None and prior[0] == self._prev_frame and np.linalg.norm(X - prior[1]) <= (
+                        c.max_speed * dt + 3 * math.sqrt(float(np.trace(strong[3] + prior[2]))))
+                    self.reinit_count = self.reinit_count + 1 if consistent else 1
+                    self._reinit_candidate = (frame, X.copy(), strong[3].copy())
                 else:
                     self.reinit_count = 0
+                    self._reinit_candidate = None
                 if self.reinit_count >= c.reinit_frames:
                     n, sc, X, cov, views, errs = strong
                     self._init(X, cov, frame, self.x[self.nk:].copy() if (self.box and self.x is not None) else None)
@@ -906,6 +940,7 @@ class Tracker3D:
                     info["reinit"] = True
             else:
                 self.reinit_count = 0
+                self._reinit_candidate = None
             # перезахват по одной камере: трек только прогнозируется, а устойчивая (несколько кадров подряд
             # на одном месте) детекция вне гейта есть — создать трек заново по лучу и размеру
             if mode == "predict" and ((c.object_size_m is not None and c.reacq_prior) or self.size_phys) and c.mono_init:
@@ -928,6 +963,8 @@ class Tracker3D:
 
         if self.x is not None and mode in ("tri", "mono", "mono_size_prior"):
             self._update_omega()
+        if self._limited_update:
+            info["limited_update"] = True
         res = self._result(frame, mode, used, reproj, info)
         self.history.append(res)
         return res

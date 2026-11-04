@@ -120,14 +120,27 @@ def results_to_arrays(res):
 
 def write_diag(path: Path, res, P_ue) -> None:
     with open(path, "w", encoding="utf-8", newline="") as f:
-        f.write("Frame;mode;n_cams;cams;used_det;sigma_m;reproj_px;speed_mps;Loc_X;Loc_Y;Loc_Z\r\n")
+        f.write("Frame;mode;n_cams;cams;used_det;sigma_m;reproj_px;speed_mps;Loc_X;Loc_Y;Loc_Z;limited_update\r\n")
         for r, p in zip(res, P_ue):
             sp = float(np.linalg.norm(r.vel)) if r.vel is not None else float("nan")
             cams = ",".join(str(c) for c in r.cams)
             # used_det: «индекс камеры в наборе:индекс детекции» — какие детекции вошли в обновление
             used = ",".join(f"{i}:{j}" for i, j in r.info.get("used_det", []))
             xyz = ";".join("" if not np.isfinite(v) else f"{v:.4f}" for v in p)
-            f.write(f"{r.frame};{r.mode};{r.n_cams};{cams};{used};{r.sigma_m:.3f};{r.reproj_px:.2f};{sp:.2f};{xyz}\r\n")
+            f.write(f"{r.frame};{r.mode};{r.n_cams};{cams};{used};{r.sigma_m:.3f};{r.reproj_px:.2f};{sp:.2f};{xyz};{int(bool(r.info.get('limited_update')))}\r\n")
+
+def video_observations(res, detections, cameras, fps):
+    return {
+        "fps": fps, "sizes": [list(camera.model(0).size) for camera in cameras],
+        "cams": [camera.cam_id for camera in cameras],
+        "points": [{
+            "frame": r.frame, "t": r.frame / fps, "mode": r.mode, "n_cams": r.n_cams,
+            "sigma_m": float(r.sigma_m) if np.isfinite(r.sigma_m) else None,
+            "limited_update": bool(r.info.get("limited_update")), "used_det": r.info.get("used_det", []),
+            "dets": [[[round(float(v), 1) for v in d.bbox] + [round(float(d.score), 3), d.source]
+                     for d in row] for row in detections[r.frame]],
+        } for r in res],
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -166,7 +179,8 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def fuse_frames(parts: list, n: int, primary_sources, mode: str = "fallback", drop_border_px: float = 3.0) -> list:
+def fuse_frames(parts: list, n: int, primary_sources, mode: str = "fallback", drop_border_px: float = 3.0,
+                point: str = "kp:pivot") -> list:
     """Слияние детекций нескольких детекторов по кадрам и камерам.
 
     primary — детекции из primary_sources (например, поза грузовика с точкой pivot); рамка у края кадра у них
@@ -180,6 +194,7 @@ def fuse_frames(parts: list, n: int, primary_sources, mode: str = "fallback", dr
             for fr in parts:
                 for d in fr[k][i]:
                     (prim if d.source in primary_sources else sec).append(d)
+            prim = [d for d in prim if d.point_is_reliable(point)]
             if drop_border_px is not None and prim:
                 prim = [d for d in prim if d.bbox[0] > drop_border_px and d.bbox[1] > drop_border_px
                         and d.bbox[2] < d.extra.get("img_w", 1920) - drop_border_px
@@ -211,7 +226,8 @@ def build_detector_frames(ds, spec: dict, n: int, out: Path, use_cache: bool):
             raise RuntimeError("ни один детектор не доступен")
         prim = tuple((spec.get("tracker") or {}).get("primary_sources", ()))
         fu = spec.get("fusion") or {}
-        frames = fuse_frames(parts, n, prim, fu.get("mode", "fallback"), fu.get("drop_border_px", 3.0))
+        frames = fuse_frames(parts, n, prim, fu.get("mode", "fallback"), fu.get("drop_border_px", 3.0),
+                             (spec.get("tracker") or {}).get("point", "center"))
         return frames, {"parts": stats}, {"parts": cfgs, "fusion": fu}
     from .basic_detectors import combine_dets, make_detector
     from .detect_stage import load_detections_file
@@ -259,7 +275,8 @@ def run_object(ds, spec: dict, n: int, out_root: Path, a) -> dict:
         r = spec["roi"]
         refiner = RoiRefiner(r.get("weights", "yolo11m.pt"), imgsz=r.get("imgsz", 640), classes=tuple(r.get("classes", ())),
                              conf=r.get("conf", 0.1),
-                             cache_path=out / f"roi_cache_{Path(r.get('weights', 'yolo11m.pt')).stem}_{r.get('imgsz', 640)}.json")
+                             cache_path=out / f"roi_cache_{Path(r.get('weights', 'yolo11m.pt')).stem}_{r.get('imgsz', 640)}.json",
+                             device=r.get("device", "cpu"))
     res, _, used, all_tracks = track(ds, frames, cfg, n, refiner, log=lambda m: print(m, flush=True),
                                      multi=int(spec.get("multi", 0)),
                                      refiner_only_if_empty=bool((spec.get("roi") or {}).get("only_if_empty", False)),
@@ -280,6 +297,11 @@ def run_object(ds, spec: dict, n: int, out_root: Path, a) -> dict:
     csv_path = out_root / spec.get("out_csv", f"{name}.csv")
     write_ue_csv(csv_path, np.arange(n), P_ue)
     write_diag(out_root / (Path(spec.get("out_csv", f"{name}.csv")).stem + "_diag.csv"), res, P_ue)
+    observations_path = out_root / (Path(spec.get("out_csv", f"{name}.csv")).stem + "_observations.json")
+    observations = video_observations(res, used, ds.cameras, ds.fps)
+    observations["trajectory_sha256"] = hashlib.sha256(csv_path.read_text(encoding="utf-8").encode("utf-8")).hexdigest()
+    observations_path.write_text(json.dumps(observations,
+                                            ensure_ascii=False, allow_nan=False), encoding="utf-8")
     uniq, cnt = np.unique(modes, return_counts=True)
     summary = {
         "name": name, "csv": str(csv_path), "detector": dcfg, "tracker": cfg.__dict__, "detection": dstats,

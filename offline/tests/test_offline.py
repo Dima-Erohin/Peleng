@@ -404,6 +404,11 @@ def test_run_robust_inputs(tmp_path):
     rows = (out / "obj.csv").read_text().strip().splitlines()
     assert rows[0] == "Frame;Loc_X;Loc_Y;Loc_Z" and len(rows) == 1 + n_vid
     assert (out / "viewer.json").exists()
+    overlay = _json.loads((out / "obj_observations.json").read_text())
+    assert len(overlay["points"]) == n_vid
+    assert len(overlay["sizes"]) == 3
+    assert overlay["points"][10]["t"] == 10 / FPS
+    assert isinstance(overlay["points"][10]["limited_update"], bool)
 
 
 def _arc_est(R=100.0, n=240, step_m=0.5, y_pivot=5.0, noise=0.0, seed=0):
@@ -500,3 +505,55 @@ def test_secondary_offset_measurement():
     E, _ = track_frames(cams, frames, cfg)
     err = np.linalg.norm(E - T, axis=1)
     assert np.sqrt(np.nanmean(err[60:] ** 2)) < 1.5
+
+
+def test_unreliable_pivot_is_not_a_measurement():
+    """Высокая уверенность рамки не делает невидимый pivot надёжным."""
+    T, cams, frames = run_synth(1)
+    for row in frames[0]:
+        for d in row:
+            d.source = "truck_pose"
+            d.extra = {"pivot": d.point_px, "kp_conf": 0.01}
+    tr = Tracker3D(TrackerConfig(point="kp:pivot", primary_sources=("truck_pose",)))
+    r = tr.step(0, cams, frames[0])
+    assert r.pos is None and r.mode == "none"
+
+
+def test_fusion_uses_fallback_when_pivot_is_unreliable():
+    from offline.run import fuse_frames
+
+    bad = Detection((100, 100, 200, 150), (0, 0), 0.95, "truck", "truck_pose",
+                    {"pivot": (0, 0), "kp_conf": 0.01})
+    base = Detection((100, 100, 200, 150), (150, 125), 0.8, "truck", "truck")
+    fused = fuse_frames([[[[bad]]], [[[base]]]], 1, ("truck_pose",))
+    assert fused[0][0] == [base]
+
+
+def test_reacquisition_requires_a_consistent_hypothesis():
+    T, cams, frames = run_synth(60, seed=2)
+    rng = np.random.default_rng(4)
+    for k in range(30, 42):
+        wrong = T[k] + np.array([40 if k % 2 else -40, 0, 0])
+        frames[k] = synth_dets(cams, wrong, [True] * len(cams), rng, noise_px=0, clutter=False)
+    _, tr = track_frames(cams, frames, TrackerConfig(reinit_frames=3, size_range=False, mono_init=False))
+    assert not any(h.info.get("reinit") for h in tr.history[30:42])
+
+
+def test_reappearance_cannot_move_position_faster_than_speed_limit():
+    """Большая неопределённость после пропуска не разрешает телепорт при коррекции EKF."""
+    T, cams, _ = run_synth(1)
+    tr = Tracker3D(TrackerConfig(size_range=False, mono_init=False))
+    tr._init(T[0], np.eye(3) * 100, 0)
+    tr.frame = 0
+    target = T[0] + np.array([12, 0, 0])
+    rng = np.random.default_rng(7)
+    previous = T[0]
+    limited = False
+    for k in range(1, 61):
+        r = tr.step(k, cams, synth_dets(cams, target, [True] * len(cams), rng, noise_px=0, clutter=False))
+        assert np.linalg.norm(r.pos - previous) <= tr.cfg.max_speed / FPS + 1e-8
+        assert np.linalg.eigvalsh(tr.P).min() > -1e-8
+        limited |= bool(r.info.get("limited_update"))
+        previous = r.pos
+    assert limited
+    assert np.linalg.norm(previous - target) < 0.5

@@ -57,7 +57,7 @@
 .playback-frame b { padding-left: 7px; color: #afbec8; font-weight: 400; }
 .playback-rate { width: 76px; margin-left: auto; }
 .playback-rate .select-trigger { min-height: 30px; background: #20272d; border-color: #354049; font: 10px var(--font-ui); }
-.playback-rate .dropdown-menu { top: auto; bottom: calc(100% + 6px); }
+.playback-rate .select-dropdown .dropdown-menu { top: auto; bottom: calc(100% + 6px); }
 .playback-rate .select-option { min-height: 28px; font: 10px var(--font-ui); }
 .replay-sidebar { min-height: 0; overflow-y: auto; border-left: 1px solid #30363c; background: #191d21; scrollbar-width: thin; scrollbar-color: #434a50 transparent; }
 .replay-sidebar > section { padding: 20px 21px; border-bottom: 1px solid #2c333a; }
@@ -117,6 +117,34 @@
 .motion-readout b { color: #bdcbd5; font: 12px var(--font-ui); font-variant-numeric: tabular-nums; }
 .motion-readout small { color: #728794; font: 9px var(--font-ui); }
 .coordinate-charts { display: grid; gap: 8px; }
+.replay-minimap { padding: 22px; border-bottom: 1px solid #30383f; }
+.minimap-viewport { width: 100%; height: 220px; margin-top: 15px; overflow: hidden; border: 1px solid #34414b; border-radius: 6px; }
+.minimap-viewport canvas { display: block; width: 100%; height: 100%; touch-action: none; }
+.minimap-actions { display: flex; gap: 7px; margin-top: 8px; }
+.minimap-actions button, .minimap-legend button { padding: 6px 8px; border: 1px solid #34414b; border-radius: 4px; background: #20272d; color: #aabac6; font-size: 9px; cursor: pointer; }
+.minimap-actions button:active, .minimap-legend button:active { transform: scale(.97); }
+.minimap-legend { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.minimap-legend button { display: flex; align-items: center; gap: 5px; }
+.minimap-legend button[aria-pressed="true"] { border-color: #8196a6; color: #e2e8ec; }
+.minimap-legend i { width: 5px; height: 5px; border-radius: 50%; }
+.replay-minimap p { margin: 8px 0 0; color: #8c9da9; font-size: 9px; line-height: 1.6; }
+.tracking-performance { padding: 22px; border-bottom: 1px solid #30383f; min-width: 0; }
+.performance-readouts { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0 8px; }
+.performance-readouts span { display: flex; align-items: center; gap: 6px; font-size: 10px; }
+.performance-readouts i { width: 13px; height: 2px; background: currentColor; }
+.performance-hz i { background: repeating-linear-gradient(to right, currentColor 0 4px, transparent 4px 6px); }
+.performance-readouts b { display: block; margin-top: 6px; font-size: 22px; font-weight: 500; font-variant-numeric: tabular-nums; }
+.performance-readouts small { font-size: 10px; font-weight: 400; }
+.performance-error { color: #dfbd78; fill: #dfbd78; }
+.performance-hz { color: #78b8e4; fill: #78b8e4; }
+.tracking-performance svg { display: block; width: 100%; overflow: visible; }
+.tracking-performance svg text { fill: #8c9da9; font: 8px var(--font-ui); }
+.tracking-performance svg .performance-error { fill: #dfbd78; }
+.tracking-performance svg .performance-hz { fill: #78b8e4; }
+.performance-error-line, .performance-hz-line { fill: none; stroke-width: 1.6; stroke-linejoin: round; }
+.performance-error-line { stroke: #dfbd78; }
+.performance-hz-line { stroke: #78b8e4; stroke-dasharray: 4 2; }
+.tracking-performance p { margin: 8px 0 0; color: #8c9da9; font-size: 9px; line-height: 1.6; }
 .coordinate-chart { border-top: 1px solid #303b44; padding-top: 8px; }
 .chart-caption { display: flex; justify-content: space-between; font: 8px var(--font-ui); color: #6f8594; }
 .chart-caption b { font-weight: 500; }
@@ -190,3 +218,11 @@
 /* Онлайн-прогон (offline/online.py) */
 .online-run .online-icon { background: #89c7a2; color: #10161b; }
 .online-run .online-note { margin: 10px 0 0; font-size: 12px; line-height: 1.45; opacity: 0.72; }
+.tracking-quality { display: grid; gap: 5px; margin-top: 12px; padding: 10px 12px; border-left: 2px solid #89c7a2; background: #89c7a208; }
+.tracking-quality b { color: #a4d6be; font-size: 11px; font-weight: 500; }
+.tracking-quality span, .tracking-quality small { color: #a1aeb7; font-size: 10px; line-height: 1.45; }
+.tracking-quality small { color: #82949f; font-size: 9px; }
+.tracking-quality.is-warning { border-color: #dfbd78; background: #dfbd7808; }
+.tracking-quality.is-warning b { color: #dfbd78; }
+.tracking-quality.is-lost { border-color: #df8178; background: #df817808; }
+.tracking-quality.is-lost b { color: #df8178; }
