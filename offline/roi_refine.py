@@ -108,6 +108,35 @@ class RoiRefiner:
             self.save()
         return out
 
+    def detect_many(self, items: list) -> list[list[Detection]]:
+        """Несколько окон одним вызовом сети (онлайн-режим): items — [(image, win)], без кэша."""
+        if not items:
+            return []
+        self._load()
+        crops, metas = [], []
+        for image, (x0, y0, side) in items:
+            H, W = image.shape[:2]
+            crops.append(image[y0:min(H, y0 + side), x0:min(W, x0 + side)])
+            metas.append((x0, y0, W, H))
+        t = time.time()
+        rs = self.model.predict(crops, imgsz=self.imgsz, conf=self.conf, classes=self.class_ids, verbose=False,
+                                device=self.device)
+        self.t_model += time.time() - t
+        self.n_run += len(items)
+        out = []
+        for r, crop, (x0, y0, W, H) in zip(rs, crops, metas):
+            ch, cw = crop.shape[:2]
+            dets = []
+            if r.boxes is not None:
+                for c, sc, b in zip(r.boxes.cls.tolist(), r.boxes.conf.tolist(), r.boxes.xyxy.tolist()):
+                    cut = (b[0] < 2 and x0 > 0) or (b[1] < 2 and y0 > 0) or (b[2] > cw - 2 and x0 + cw < W) or                           (b[3] > ch - 2 and y0 + ch < H)
+                    if cut:
+                        continue
+                    bb = (b[0] + x0, b[1] + y0, b[2] + x0, b[3] + y0)
+                    dets.append(Detection(bb, ((bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2), float(sc), r.names[int(c)], "roi"))
+            out.append(dets)
+        return out
+
     def save(self):
         if self.cache_path and self._dirty:
             tmp = self.cache_path.with_suffix(".tmp")

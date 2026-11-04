@@ -25,3 +25,11 @@ Thumbs.db
 
 # рабочие копии агентов Claude Code
 .claude/worktrees/
+
+# обучение детектора грузовика (run_truck_train.ps1 -Out в корень проекта)
+/truck_ds/
+/runs/
+/RESULT/
+
+# обученный детектор позы грузовика для онлайн-прогона (offline/online.py) — в git
+!models/truck_pose_All.pt

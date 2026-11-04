@@ -64,10 +64,25 @@ class TruckPoseDetector(Detector):
         return self.model.predict(image, imgsz=self.imgsz, conf=self.conf, max_det=self.max_det, verbose=False, device=self.device)[0]
 
     def detect(self, cam_id, frame_idx, image, camera_model) -> list[Detection]:
-        r = self._run(image)
+        return self._parse(self._run(image))
+
+    def detect_batch(self, images: list) -> list[list[Detection]]:
+        """Кадры всех камер одним вызовом сети (онлайн-режим, offline/online.py). None — камера без кадра."""
+        idx = [i for i, im in enumerate(images) if im is not None]
+        out: list[list[Detection]] = [[] for _ in images]
+        if not idx:
+            return out
+        rs = self.model.predict([images[i] for i in idx], imgsz=self.imgsz, conf=self.conf, max_det=self.max_det,
+                                verbose=False, device=self.device)
+        for i, r in zip(idx, rs):
+            out[i] = self._parse(r)
+        return out
+
+    def _parse(self, r) -> list[Detection]:
         out = []
         if r.boxes is None or len(r.boxes) == 0:
             return out
+        h, w = r.orig_shape[:2]
         kp = r.keypoints.data.cpu().numpy() if r.keypoints is not None else None
         for i, (s, b) in enumerate(zip(r.boxes.conf.tolist(), r.boxes.xyxy.tolist())):
             c = ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)
@@ -77,5 +92,5 @@ class TruckPoseDetector(Detector):
                 px, py, kc = c[0], c[1], 0.0
             allkp = kp[i].tolist() if kp is not None and len(kp) > i else []  # [[x,y,conf]]*9: pivot + 8 углов
             out.append(Detection(tuple(b), (px, py), float(s), "truck", self.name,
-                                 {"pivot": (px, py), "kp_conf": kc, "box_center": c, "kp": allkp}))
+                                 {"pivot": (px, py), "kp_conf": kc, "box_center": c, "kp": allkp, "img_w": w, "img_h": h}))
         return out

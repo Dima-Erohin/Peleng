@@ -217,23 +217,8 @@ export class TrajectoryScene {
     grid.material.transparent = true;
     grid.material.opacity = 0.6;
     this.content.add(grid);
-    for (const track of dataset.tracks) {
-      const group = new THREE.Group();
-      const ringRadius = track.kind === "drone" ? 1 : 2.5;
-      const ring = new THREE.Mesh(new THREE.RingGeometry(ringRadius - 0.04, ringRadius, 40), new THREE.MeshBasicMaterial({ color: track.color, side: THREE.DoubleSide, transparent: true }));
-      ring.position.z = track.kind === "drone" ? -0.35 : -1.25;
-      group.add(ring);
-      const trail = buildTrail(track);
-      this.content.add(group, trail.route, trail.travelled, trail.tip);
-      const object = { track, group, ring, ...trail, sample: {}, heading: null, enabled: true };
-      if (track.kind === "drone") {
-        object.model = createDroneModel(track.color);
-        group.add(object.model);
-      } else if (track.kind === "object") {
-        group.add(new THREE.Mesh(new THREE.OctahedronGeometry(0.6), new THREE.MeshStandardMaterial({ color: track.color })));
-      }
-      this.objects.set(track.id, object);
-    }
+    for (const track of dataset.tracks) this.createObject(track);
+    this.liveTrack = null;
     for (const reconstruction of dataset.reconstructions || []) {
       const lines = lineSegments(new Float32Array(reconstruction.cameraIds.length * 6), 0x69b9ed, 0.5);
       lines.name = `observation-rays:${reconstruction.id}`;
@@ -263,6 +248,50 @@ export class TrajectoryScene {
     this.loadModel().catch((error) => {
       if (!this.disposed && revision === this.revision) this.callbacks.onError(`Модель CargoTruck: ${error.message}`);
     });
+  }
+
+  createObject(track) {
+    const group = new THREE.Group();
+    const ringRadius = track.kind === "drone" ? 1 : 2.5;
+    const ring = new THREE.Mesh(new THREE.RingGeometry(ringRadius - 0.04, ringRadius, 40), new THREE.MeshBasicMaterial({ color: track.color, side: THREE.DoubleSide, transparent: true }));
+    ring.position.z = track.kind === "drone" ? -0.35 : -1.25;
+    group.add(ring);
+    const trail = buildTrail(track);
+    this.content.add(group, trail.route, trail.travelled, trail.tip);
+    const object = { track, group, ring, ...trail, sample: {}, heading: null, enabled: true };
+    if (track.kind === "drone") {
+      object.model = createDroneModel(track.color);
+      group.add(object.model);
+    } else if (track.kind === "object") {
+      group.add(new THREE.Mesh(new THREE.OctahedronGeometry(0.6), new THREE.MeshStandardMaterial({ color: track.color })));
+    }
+    this.objects.set(track.id, object);
+    return object;
+  }
+
+  // Онлайн-трек (offline/online.py): точки приходят по WebSocket, след пересобирается с каждой новой точкой.
+  // track.live = true; track.liveVel — скорость в последней точке (м/с) для движения модели между точками.
+  setLiveTrack(track) {
+    if (!this.dataset) return;
+    const old = track && this.objects.get(track.id);
+    if (old) {
+      for (const line of [old.route, old.travelled, old.tip]) { this.content.remove(line); line.geometry.dispose(); line.material.dispose(); }
+      Object.assign(old, buildTrail(track), { track });
+      this.content.add(old.route, old.travelled, old.tip);
+    } else if (track) {
+      const object = this.createObject(track);
+      this.attachModel(object);
+    }
+    if (!track && this.liveTrack) {
+      const object = this.objects.get(this.liveTrack);
+      if (object) {
+        for (const item of [object.group, object.route, object.travelled, object.tip]) { this.content.remove(item); disposeTree(item); }
+        this.objects.delete(this.liveTrack);
+      }
+    }
+    this.liveTrack = track ? track.id : null;
+    this.dirtyPose = true;
+    this.needsRender = true;
   }
 
   resize() {
@@ -364,6 +393,17 @@ export class TrajectoryScene {
   updateObjects(dt) {
     for (const object of this.objects.values()) {
       const p = sampleTrack(object.track, this.time, object.sample);
+      if (object.track.live) {
+        const last = object.track.times.at(-1), ahead = this.time - last;
+        if (ahead > 0 && ahead < 3) {
+          const v = object.track.liveVel || [0, 0, 0], i = (object.track.times.length - 1) * 3;
+          p.x = object.track.positions[i] + v[0] * ahead;
+          p.y = object.track.positions[i + 1] + v[1] * ahead;
+          p.z = object.track.positions[i + 2] + v[2] * ahead;
+          p.speed = Math.hypot(v[0], v[1], v[2]);
+          p.visible = true;
+        }
+      }
       object.group.visible = p.visible && object.enabled;
       object.route.visible = object.travelled.visible = object.tip.visible = object.enabled;
       object.group.position.set(p.x, p.y, p.z);
@@ -436,13 +476,17 @@ export class TrajectoryScene {
     const delta = this.lastTick ? (now - this.lastTick) / 1000 : 0;
     const frameTime = this.lastTick ? now - this.lastTick : 0;
     this.lastTick = now;
-    if (this.dataset && this.playing) {
+    if (this.dataset && this.liveClock) {
+      const live = Math.max(this.dataset.start, Math.min(this.dataset.end, this.liveClock()));
+      if (live < this.time) this.dirtyPose = true;
+      this.time = live;
+    } else if (this.dataset && this.playing) {
       const next = advancePlayback(this.time, delta * this.rate, this.dataset.start, this.dataset.end, this.loop);
       if (next.time < this.time) this.dirtyPose = true;
       this.time = next.time;
       if (next.ended) this.setPlaying(false);
     }
-    const updatePose = this.playing || this.dirtyPose;
+    const updatePose = this.playing || this.dirtyPose || Boolean(this.liveClock);
     if (this.dataset && updatePose) this.updateObjects(delta);
     const controlsChanged = this.controls.update();
     if (this.needsRender || updatePose || controlsChanged) {
@@ -450,7 +494,7 @@ export class TrajectoryScene {
       this.needsRender = false;
       if (frameTime > 0) this.frameTimes.push(frameTime);
     }
-    if (this.playing && now - this.lastUi >= 100 && this.dataset) { this.lastUi = now; this.emitFrame(); }
+    if ((this.playing || this.liveClock) && now - this.lastUi >= 100 && this.dataset) { this.lastUi = now; this.emitFrame(); }
     if (now - this.lastStats >= 1000 && this.frameTimes.length) {
       const frames = this.frameTimes.sort((a, b) => a - b);
       const avg = frames.reduce((sum, value) => sum + value, 0) / frames.length;

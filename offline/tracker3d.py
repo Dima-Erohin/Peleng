@@ -351,6 +351,7 @@ class Tracker3D:
         self.P: np.ndarray | None = None
         self.last_update_frame = -10 ** 9
         self.frame = -1
+        self._prev_frame = -1
         self.reinit_count = 0
         self.size_phys: dict[int, float] = {}  # cam_id -> физическая высота объекта (м) по рамке этой камеры
         self.history: list[FrameResult] = []
@@ -708,13 +709,13 @@ class Tracker3D:
         return hyps
 
     # --- главный шаг ---
-    def predict_regions(self, cams: list, n_sigma: float = 3.0) -> list:
+    def predict_regions(self, cams: list, n_sigma: float = 3.0, dt: float | None = None) -> list:
         """Ожидаемые рамки объекта на СЛЕДУЮЩЕМ кадре (по прогнозу, состояние не меняется) — для поиска
         детектором в окне (ROI). Возвращает для каждой камеры (x1, y1, x2, y2) или None. Причинно: использует
         только состояние после кадров < k."""
         if self.x is None or self._lost():
             return [None] * len(cams)
-        F, Q = self._FQ(1.0 / self.cfg.fps)
+        F, Q = self._FQ(dt if dt is not None else 1.0 / self.cfg.fps)  # dt — шаг до кадра поиска (онлайн: > 1 кадра)
         x = F @ self.x
         P = F @ self.P @ F.T + Q
         out = []
@@ -745,7 +746,10 @@ class Tracker3D:
         """cams[i] — CameraModel камеры i на этом кадре, dets[i] — её детекции."""
         c = self.cfg
         cam_ids = cam_ids or list(range(len(cams)))
-        dt = 1.0 / c.fps if self.frame >= 0 else 0.0
+        # шаг по времени — по номерам кадров: онлайн-режим обрабатывает не каждый кадр (offline/online.py)
+        prev = self.frame
+        dt = (frame - prev) / c.fps if prev >= 0 else 0.0
+        self._prev_frame = prev
         self.frame = frame
         if self.x is not None:
             self.predict(dt)
@@ -792,7 +796,7 @@ class Tracker3D:
 
         if lost and strong is not None and c.init_confirm_frames > 1:
             # защита от ложного старта: гипотеза должна держаться несколько кадров подряд примерно на месте
-            if self._confirm and self._confirm[-1][0] == frame - 1 and \
+            if self._confirm and self._confirm[-1][0] == self._prev_frame and \
                     np.linalg.norm(strong[2] - self._confirm[-1][1]) < c.init_confirm_dist_m:
                 self._confirm.append((frame, strong[2]))
             else:
@@ -911,7 +915,7 @@ class Tracker3D:
                     uv = all_cands[i][j][1]
                     sz = all_cands[i][j][3].size_px
                     pr = self._reacq
-                    if pr is not None and pr[0] == frame - 1 and pr[1] == i and np.linalg.norm(uv - pr[2]) < 20 + 3 * sz:
+                    if pr is not None and pr[0] == self._prev_frame and pr[1] == i and np.linalg.norm(uv - pr[2]) < 20 + 3 * sz:
                         self._reacq = (frame, i, uv, pr[3] + 1)
                     else:
                         self._reacq = (frame, i, uv, 1)
