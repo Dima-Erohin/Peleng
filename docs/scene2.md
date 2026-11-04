@@ -54,8 +54,7 @@ $env:TRUCK_WEIGHTS="models\truck_pose_All_yolo11m-pose_1280.pt"; $env:TRUCK_IMGS
 
 Маленькая модель для сравнения: `TRUCK_WEIGHTS=models/truck_pose_All.pt` без `TRUCK_IMGSZ`.
 
-* `*.pt` в `.gitignore`: крупные веса (`truck_pose_All_yolo11m-pose_1280.pt`, 42 МБ) на хост нужно скопировать вручную.
-  В git есть только `models/truck_pose_All.pt`.
+* Обе модели позы лежат в `models/` в git — достаточно склонировать репозиторий и положить видео.
 * Кэш детекций привязан к пути весов и настройкам. Повторный прогон трекера с теми же весами занимает минуты.
 * Результат: `<out>/truck.csv` (Unreal, см, `Frame;Loc_X;Loc_Y;Loc_Z`), `<out>/truck_diag.csv`, `<out>/viewer.json`.
   Посмотреть во фронтенде: «Загрузить CSV / SVG» на странице «Траектории».
