@@ -270,7 +270,7 @@ export default function TrajectoryWorkspace({ active, navigation }) {
             {dataset?.tracks.map((item) => (
               <div className={`replay-object-row ${item.id === selectedId ? "is-selected" : ""}`} key={item.id}>
                 <button type="button" onClick={() => selectTrack(item.id)} aria-pressed={item.id === selectedId}>
-                  <i style={{ background: item.color }} /><span>{item.name}<small>{item.kind === "drone" ? "Квадрокоптер · XYZ из видео" : item.source === "triangulated" ? "Объект · XYZ из видео" : "3D-модель · исходная траектория"}</small></span>
+                  <i style={{ background: item.color }} /><span>{item.name}<small>{item.kind === "drone" ? "Квадрокоптер · XYZ из видео" : item.source === "triangulated" ? "Объект · XYZ из видео" : item.source === "estimate" ? "Грузовик · XYZ из видео (offline)" : "3D-модель · исходная траектория"}</small></span>
                   <MotionWaveform track={item} time={time} compact />
                 </button>
                 <button type="button" className="object-visibility" aria-label={`Показать ${item.name}`} aria-pressed={!hiddenTracks.includes(item.id)} onClick={() => toggleTrack(item.id)}>

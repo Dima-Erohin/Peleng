@@ -198,6 +198,11 @@ export async function loadDemo(signal) {
     fetchText(`${base}drone-camera5.json`, signal),
     ...[1, 2, 3, 4, 5].map((i) => fetchText(`${base}clean/object_transform_CineCameraActor${i}.csv`, signal)),
   ]);
+  // Оценка offline-трекера (offline/run.py -> truck.csv). Необязательна: без файла демо показывает только эталон.
+  const estimateText = await fetchText(`${base}estimate/truck.csv`, signal).catch((error) => {
+    if (signal?.aborted) throw error;
+    return null;
+  });
   const cameras = cameraTexts.map((text, index) => {
     const rows = text.trim().split(/\r?\n/);
     const samples = rows.slice(1).map((row) => {
@@ -212,7 +217,10 @@ export async function loadDemo(signal) {
     };
   });
   return createDataset(
-    [{ ...parseTrajectoryCsv(object, { id: "truck-1", name: "Cargo Truck · 01" }), kind: "truck", source: "reference" }],
+    [
+      { ...parseTrajectoryCsv(object, { id: "truck-1", name: "Cargo Truck · 01" }), kind: "truck", source: "reference" },
+      ...(estimateText ? [{ ...parseTrajectoryCsv(estimateText, { id: "truck-est", name: "Peleng · оценка" }), kind: "truck", source: "estimate" }] : []),
+    ],
     {
       name: "Project 02", cameras, imageTracks: [parseImageTrack(JSON.parse(droneText))],
       dataQuality: JSON.parse(reportText),
