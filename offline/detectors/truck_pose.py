@@ -55,7 +55,7 @@ class TruckPoseDetector(Detector):
             raise ValueError("укажите weights=... или TRUCK_WEIGHTS (best.pt)")
         self.weights, self.conf, self.device, self.max_det, self.tta = weights, conf, device, max_det, hflip_tta
         self.model = YOLO(weights)
-        self.imgsz = imgsz or int(self.model.overrides.get("imgsz", 800))
+        self.imgsz = imgsz or int(os.environ.get("TRUCK_IMGSZ") or self.model.overrides.get("imgsz", 800))
 
     def config(self) -> dict:
         return {"name": self.name, "weights": str(self.weights), "conf": self.conf, "imgsz": self.imgsz, "tta": self.tta}
