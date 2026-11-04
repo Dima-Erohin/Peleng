@@ -388,7 +388,7 @@ def main(argv=None):
     engine = OnlineEngine(a.data, a.weights, a.device, a.fallback, a.conf, a.roi_weights, a.roi_below)
     app = create_app(engine)
     url = f"http://localhost:{a.port}/"
-    print(f"\n=== Peleng online ===\n  откройте {url}  (прогон начнётся при открытии страницы)\n", flush=True)
+    print(f"\n=== Peleng online ===\n  откройте {url}  (воспроизведение; онлайн-расчёт — {url}?online=1)\n", flush=True)
     if not a.no_browser:
         threading.Timer(1.5, lambda: webbrowser.open(url)).start()
     import uvicorn

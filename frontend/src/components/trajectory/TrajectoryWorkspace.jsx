@@ -32,6 +32,7 @@ export default function TrajectoryWorkspace({ active, navigation }) {
   const [rate, setRate] = useState(1);
   const [loop, setLoop] = useState(true);
   const [follow, setFollow] = useState(true);
+  const [showRoute, setShowRoute] = useState(false);
   const [selectedId, setSelectedId] = useState("");
   const [hiddenTracks, setHiddenTracks] = useState([]);
   const [stats, setStats] = useState(null);
@@ -42,6 +43,7 @@ export default function TrajectoryWorkspace({ active, navigation }) {
   const [url, setUrl] = useState("");
   // Онлайн-прогон (offline/online.py): есть, если страницу отдаёт онлайн-сервер
   const [online, setOnline] = useState(null);
+  const [videoServer, setVideoServer] = useState(false);
   const [liveTrack, setLiveTrack] = useState(null);
   const onlineRef = useRef({ ws: null, hello: null, points: [] });
   const track = selectedId === ONLINE_TRACK_ID ? liveTrack : dataset?.tracks.find((item) => item.id === selectedId);
@@ -99,18 +101,25 @@ export default function TrajectoryWorkspace({ active, navigation }) {
     const controller = new AbortController();
     fetch("/api/online/state", { signal: controller.signal, cache: "no-store" })
       .then((response) => response.ok ? response.json() : null)
-      .then((info) => { if (info?.type === "hello") setOnline({ info, status: "подключение", stats: null }); })
+      .then((info) => {
+        if (info?.type !== "hello") return;
+        setVideoServer(true);
+        // онлайн-расчёт — только по ссылке /?online=1; без неё — воспроизведение готовых траекторий
+        if (new URLSearchParams(location.search).get("online") === "1") setOnline({ info, status: "подключение", stats: null });
+      })
       .catch(() => {});
     return () => controller.abort();
   }, []);
 
-  // В онлайн-режиме: без готовой offline-оценки (её считает сервер сейчас), видео — с онлайн-сервера
+  // Страницу отдаёт offline/online.py: видео — с него (в сборке их может не быть). Онлайн-режим — без готовой
+  // offline-оценки: её считает сервер сейчас.
   useEffect(() => {
-    if (!online || !dataset || dataset.online) return;
-    const onlineClips = dataset.clips.map((clip, i) => ({ ...clip, url: `/api/online/video/${i}` }));
-    setDataset({ ...dataset, online: true, clips: onlineClips, tracks: dataset.tracks.filter((item) => item.source !== "estimate") });
-    setClips(onlineClips);
-  }, [online, dataset]);
+    if (!videoServer || !dataset || dataset.serverClips || dataset.name !== "Project 02") return;
+    const serverClips = dataset.clips.map((clip, i) => ({ ...clip, url: `/api/online/video/${i}` }));
+    setDataset({ ...dataset, serverClips: true, online: Boolean(online), clips: serverClips,
+      tracks: online ? dataset.tracks.filter((item) => item.source !== "estimate") : dataset.tracks });
+    setClips(serverClips);
+  }, [videoServer, online, dataset]);
 
   useEffect(() => {
     if (!online || !dataset?.online || !engineReady) return;
@@ -148,6 +157,7 @@ export default function TrajectoryWorkspace({ active, navigation }) {
   const restartOnline = () => onlineRef.current.ws?.readyState === WebSocket.OPEN && onlineRef.current.ws.send(JSON.stringify({ type: "start" }));
 
   useEffect(() => { engineRef.current?.setActive(active); }, [active, engineReady]);
+  useEffect(() => { engineRef.current?.setShowRoute(showRoute); }, [showRoute, engineReady]);
   useEffect(() => { if (engineRef.current) engineRef.current.rate = rate; }, [rate, engineReady]);
   useEffect(() => { if (engineRef.current) engineRef.current.loop = loop; }, [loop, engineReady]);
   useEffect(() => {
@@ -274,6 +284,8 @@ export default function TrajectoryWorkspace({ active, navigation }) {
               <button type="button" className={follow ? "is-active" : ""} aria-label="Следовать за объектом" aria-pressed={follow}
                 onClick={() => setFollow(!follow)}><PlaybackIcon name="target" /><span>Следовать</span></button>
               <button type="button" aria-label="Вся траектория" onClick={() => { setFollow(false); engineRef.current?.focus(true); }}><PlaybackIcon name="overview" /><span>Обзор</span></button>
+              <button type="button" className={showRoute ? "is-active" : ""} aria-label="Показать весь маршрут" aria-pressed={showRoute}
+                onClick={() => setShowRoute(!showRoute)}><PlaybackIcon name="overview" /><span>Маршрут</span></button>
               <button type="button" aria-label="Приблизить объект" onClick={() => engineRef.current?.focus()}><PlaybackIcon name="reset" /><span>К объекту</span></button>
             </div>
             {!modelReady && !error && <div className="scene-loading" role="status"><span className="loading-dot" />{loading ? "Читаем траектории" : "Загружаем CargoTruck.fbx"}</div>}

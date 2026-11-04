@@ -94,6 +94,8 @@ export class TrajectoryScene {
     this.loop = true;
     this.rate = 1;
     this.follow = true;
+    // весь маршрут наперёд скрыт: след рисуется только позади объекта, по мере проигрывания
+    this.showRoute = false;
     this.time = 0;
     this.objects = new Map();
     this.cameraObjects = [];
@@ -335,6 +337,12 @@ export class TrajectoryScene {
     this.emitFrame();
   }
 
+  setShowRoute(show) {
+    this.showRoute = show;
+    this.dirtyPose = true;
+    this.needsRender = true;
+  }
+
   select(id) {
     this.selected = id;
     this.dirtyPose = true;
@@ -405,7 +413,8 @@ export class TrajectoryScene {
         }
       }
       object.group.visible = p.visible && object.enabled;
-      object.route.visible = object.travelled.visible = object.tip.visible = object.enabled;
+      object.route.visible = object.enabled && this.showRoute;
+      object.travelled.visible = object.tip.visible = object.enabled;
       object.group.position.set(p.x, p.y, p.z);
       if (this.dirtyPose || object.heading == null) object.heading = p.heading;
       else if (p.speed > 0.01) {
