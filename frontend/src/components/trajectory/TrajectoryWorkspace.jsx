@@ -10,6 +10,7 @@ import MotionWaveform from "./MotionWaveform";
 import { createDataset, fetchText, loadDemo, MAX_TRACKS, MAX_TOTAL_SAMPLES, parseTrajectoryCsv, parseTrajectorySvg } from "../../trajectory/data.js";
 import { parseImageTrack } from "../../trajectory/image-tracks.js";
 import { reconstructDataset } from "../../trajectory/reconstruction.js";
+import { buildOnlineTrack, onlineClock, onlineStats, ONLINE_TRACK_ID } from "../../trajectory/online.js";
 
 const EMPTY_SAMPLE = { x: 0, y: 0, z: 0, speed: 0, distance: 0, visible: false };
 
@@ -31,6 +32,7 @@ export default function TrajectoryWorkspace({ active, navigation }) {
   const [rate, setRate] = useState(1);
   const [loop, setLoop] = useState(true);
   const [follow, setFollow] = useState(true);
+  const [showRoute, setShowRoute] = useState(false);
   const [selectedId, setSelectedId] = useState("");
   const [hiddenTracks, setHiddenTracks] = useState([]);
   const [stats, setStats] = useState(null);
@@ -39,7 +41,12 @@ export default function TrajectoryWorkspace({ active, navigation }) {
   const [fps, setFps] = useState(30);
   const [units, setUnits] = useState("cm");
   const [url, setUrl] = useState("");
-  const track = dataset?.tracks.find((item) => item.id === selectedId);
+  // Онлайн-прогон (offline/online.py): есть, если страницу отдаёт онлайн-сервер
+  const [online, setOnline] = useState(null);
+  const [videoServer, setVideoServer] = useState(false);
+  const [liveTrack, setLiveTrack] = useState(null);
+  const onlineRef = useRef({ ws: null, hello: null, points: [] });
+  const track = selectedId === ONLINE_TRACK_ID ? liveTrack : dataset?.tracks.find((item) => item.id === selectedId);
   const pendingObjects = dataset?.reconstructions?.filter((item) => !item.hasTrack) || [];
   const selectedObservation = dataset?.reconstructions?.find((item) => item.id === selectedId);
 
@@ -90,7 +97,67 @@ export default function TrajectoryWorkspace({ active, navigation }) {
     engine.setDataset(dataset);
   }, [dataset, engineReady]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/online/state", { signal: controller.signal, cache: "no-store" })
+      .then((response) => response.ok ? response.json() : null)
+      .then((info) => {
+        if (info?.type !== "hello") return;
+        setVideoServer(true);
+        // онлайн-расчёт — только по ссылке /?online=1; без неё — воспроизведение готовых траекторий
+        if (new URLSearchParams(location.search).get("online") === "1") setOnline({ info, status: "подключение", stats: null });
+      })
+      .catch(() => {});
+    return () => controller.abort();
+  }, []);
+
+  // Страницу отдаёт offline/online.py: видео — с него (в сборке их может не быть). Онлайн-режим — без готовой
+  // offline-оценки: её считает сервер сейчас.
+  useEffect(() => {
+    if (!videoServer || !dataset || dataset.serverClips || dataset.name !== "Project 02") return;
+    const serverClips = dataset.clips.map((clip, i) => ({ ...clip, url: `/api/online/video/${i}` }));
+    setDataset({ ...dataset, serverClips: true, online: Boolean(online), clips: serverClips,
+      tracks: online ? dataset.tracks.filter((item) => item.source !== "estimate") : dataset.tracks });
+    setClips(serverClips);
+  }, [videoServer, online, dataset]);
+
+  useEffect(() => {
+    if (!online || !dataset?.online || !engineReady) return;
+    const engine = engineRef.current;
+    const state = onlineRef.current;
+    const showTrack = () => {
+      const value = buildOnlineTrack(state.points);
+      if (value) { engine.setLiveTrack(value); setLiveTrack(value); }
+      setOnline((current) => current && { ...current, stats: onlineStats(state.points) });
+    };
+    const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/online`);
+    state.ws = ws;
+    ws.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      if (message.type === "hello") {
+        state.hello = message;
+        state.points = message.points || [];
+        engine.setLiveTrack(null);
+        setLiveTrack(null);
+        engine.liveClock = message.t0 ? onlineClock(message) : null;
+        engine.setPlaying(true);
+        setOnline((current) => current && { ...current, info: message, status: message.done ? "завершён" : "идёт" });
+        showTrack();
+      } else if (message.type === "point" && message.session === state.hello?.session) {
+        state.points.push(message);
+        showTrack();
+      } else if (message.type === "done" && message.session === state.hello?.session) {
+        setOnline((current) => current && { ...current, status: "завершён" });
+      }
+    };
+    ws.onclose = () => setOnline((current) => current && { ...current, status: "нет связи" });
+    return () => { ws.onclose = null; ws.close(); engine.liveClock = null; state.ws = null; };
+  }, [online !== null, dataset?.online, engineReady]);
+
+  const restartOnline = () => onlineRef.current.ws?.readyState === WebSocket.OPEN && onlineRef.current.ws.send(JSON.stringify({ type: "start" }));
+
   useEffect(() => { engineRef.current?.setActive(active); }, [active, engineReady]);
+  useEffect(() => { engineRef.current?.setShowRoute(showRoute); }, [showRoute, engineReady]);
   useEffect(() => { if (engineRef.current) engineRef.current.rate = rate; }, [rate, engineReady]);
   useEffect(() => { if (engineRef.current) engineRef.current.loop = loop; }, [loop, engineReady]);
   useEffect(() => {
@@ -202,8 +269,8 @@ export default function TrajectoryWorkspace({ active, navigation }) {
 
   return (
     <main className="app-shell replay-shell">
-      <BrandHeader connected={ready} status={loading ? "Загрузка данных…" : playing ? "Воспроизведение" : "Траектории · пауза"}
-        mode="Траектории" detector="CSV / SVG / 2D → 3D">{navigation}</BrandHeader>
+      <BrandHeader connected={ready} status={loading ? "Загрузка данных…" : online ? `Онлайн-прогон · ${online.status}` : playing ? "Воспроизведение" : "Траектории · пауза"}
+        mode={online ? "Онлайн" : "Траектории"} detector={online ? `${online.info.weights} · ${online.info.device}` : "CSV / SVG / 2D → 3D"}>{navigation}</BrandHeader>
       <div className="replay-workspace">
         <section className="replay-main">
           <div className="replay-scene">
@@ -217,6 +284,8 @@ export default function TrajectoryWorkspace({ active, navigation }) {
               <button type="button" className={follow ? "is-active" : ""} aria-label="Следовать за объектом" aria-pressed={follow}
                 onClick={() => setFollow(!follow)}><PlaybackIcon name="target" /><span>Следовать</span></button>
               <button type="button" aria-label="Вся траектория" onClick={() => { setFollow(false); engineRef.current?.focus(true); }}><PlaybackIcon name="overview" /><span>Обзор</span></button>
+              <button type="button" className={showRoute ? "is-active" : ""} aria-label="Показать весь маршрут" aria-pressed={showRoute}
+                onClick={() => setShowRoute(!showRoute)}><PlaybackIcon name="overview" /><span>Маршрут</span></button>
               <button type="button" aria-label="Приблизить объект" onClick={() => engineRef.current?.focus()}><PlaybackIcon name="reset" /><span>К объекту</span></button>
             </div>
             {!modelReady && !error && <div className="scene-loading" role="status"><span className="loading-dot" />{loading ? "Читаем траектории" : "Загружаем CargoTruck.fbx"}</div>}
@@ -234,11 +303,24 @@ export default function TrajectoryWorkspace({ active, navigation }) {
             </div>
             <div className="scene-axis" aria-label="Оси координат"><span>X</span><span>Y</span><span>Z</span></div>
           </div>
-          <PlaybackControls dataset={dataset} time={time} playing={playing} rate={rate} loop={loop} disabled={!ready} fps={dataset?.fps || 30}
+          <PlaybackControls dataset={dataset} time={time} playing={playing} rate={rate} loop={loop} disabled={!ready || Boolean(online)} fps={dataset?.fps || 30}
             onPlay={play} onSeek={seek} onStep={step} onRate={setRate} onLoop={setLoop} />
         </section>
         <aside className="replay-sidebar">
           {error && <div className="replay-error" role="alert"><b>Не удалось выполнить действие</b><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="Закрыть сообщение">×</button></div>}
+          {online && (
+            <section className="replay-source online-run" aria-label="Онлайн-прогон">
+              <div className="replay-section-heading"><h2>Онлайн-прогон</h2><span>{online.status.toUpperCase()}</span></div>
+              <div className="source-card"><span className="source-file-icon online-icon">LIVE</span><div><b>Peleng · онлайн</b>
+                <small>{online.stats?.count ? `Точек: ${online.stats.count}${online.stats.rate ? ` · ${online.stats.rate.toFixed(1)} в секунду` : ""}${online.stats.lagMs != null ? ` · задержка ${(online.stats.lagMs / 1000).toFixed(1)} с` : ""}` : "Ждём первую точку"}</small></div><i /></div>
+              <p className="online-note">Координаты считает сервер в момент показа видео: детектор позы грузовика ({online.info.weights}, {online.info.device}),
+                {online.info.fallback === "roi" ? " поиск в окне вокруг прогноза," : ""} 3D-трекер. Будущих точек нет — линия растёт вслед за грузовиком. Cargo Truck · 01 — эталон для сравнения.</p>
+              <div className="source-buttons">
+                <Button onClick={restartOnline}>Перезапустить</Button>
+                <Button onClick={() => selectTrack(ONLINE_TRACK_ID)} disabled={!liveTrack}>К онлайн-объекту</Button>
+              </div>
+            </section>
+          )}
           <section className="replay-source">
             <div className="replay-section-heading"><h2>Источник данных</h2><span>01</span></div>
             <div className="source-card"><span className="source-file-icon">XYZ</span><div><b>{dataset?.name || "Нет данных"}</b><small>{track ? `Отсчётов: ${track.times.length.toLocaleString("ru")} · ${(dataset.duration).toFixed(2)} с` : selectedObservation ? `Наблюдения камер · XYZ: ${selectedObservation.validCount}` : "CSV или SVG с временными отметками"}</small></div><i /></div>

@@ -186,3 +186,7 @@
   .loading-dot { animation: none; }
   .transport-button, .transport-play, .scene-tool-stack button, .workspace-tabs button, .video-camera-tabs button, .replay-sidebar .button { transition: none; }
 }
+
+/* Онлайн-прогон (offline/online.py) */
+.online-run .online-icon { background: #89c7a2; color: #10161b; }
+.online-run .online-note { margin: 10px 0 0; font-size: 12px; line-height: 1.45; opacity: 0.72; }

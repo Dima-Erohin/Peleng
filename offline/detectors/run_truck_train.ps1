@@ -21,8 +21,22 @@ New-Item -ItemType Directory -Force -Path $Out | Out-Null
 $Venv = Join-Path $Out "venv"
 $Py = Join-Path $Venv "Scripts\python.exe"
 if (-not (Test-Path $Py)) {
-    Write-Host "== создаю venv (нужен Python 3.12: py -3.12) =="
-    if (Get-Command py -ErrorAction SilentlyContinue) { py -3.12 -m venv $Venv } else { python -m venv $Venv }
+    # лучше всего Python 3.12; если его нет — первая установленная из 3.13 / 3.11 / 3.14
+    $PyVer = $null
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        foreach ($v in "3.12", "3.13", "3.11", "3.14") {
+            & py "-$v" -c "import sys" 2>$null
+            if ($LASTEXITCODE -eq 0) { $PyVer = $v; break }
+        }
+    }
+    if ($PyVer) {
+        Write-Host "== создаю venv на Python $PyVer =="
+        if ($PyVer -ne "3.12") { Write-Host "   (рекомендуется 3.12: winget install -e --id Python.Python.3.12, затем удалить $Venv и запустить снова)" }
+        & py "-$PyVer" -m venv $Venv
+    } else {
+        Write-Host "== создаю venv на python из PATH =="
+        python -m venv $Venv
+    }
     Check "venv"
     & $Py -m pip install --upgrade pip
     & $Py -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu

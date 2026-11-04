@@ -1,3 +1,5 @@
 # Preserve original archive bytes for the SHA-256 provenance checks.
 frontend/public/demo/project2/*.csv -text whitespace=cr-at-eol
 *.ps1 text eol=crlf
+frontend/public/demo/project2/clean/*.csv text eol=lf
+*.sh text eol=lf
