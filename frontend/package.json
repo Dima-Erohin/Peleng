@@ -4,11 +4,15 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "build": "vite build"
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "test": "node --test src/trajectory/*.test.js",
+    "prepare:demo": "node scripts/prepare-demo.mjs"
   },
   "dependencies": {
     "react": "^19.1.0",
-    "react-dom": "^19.1.0"
+    "react-dom": "^19.1.0",
+    "three": "^0.170.0"
   },
   "devDependencies": {
     "vite": "^6.3.5"

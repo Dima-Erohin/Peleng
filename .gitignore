@@ -15,6 +15,7 @@ venv/
 .pytest_cache/
 frontend/node_modules/
 backend/web/build/
+frontend/public/demo/project2/*.mp4
 
 # IDE / ОС
 .vscode/
