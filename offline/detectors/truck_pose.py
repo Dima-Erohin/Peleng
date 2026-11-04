@@ -53,6 +53,7 @@ class TruckPoseDetector(Detector):
         weights = weights or os.environ.get("TRUCK_WEIGHTS")
         if not weights:
             raise ValueError("укажите weights=... или TRUCK_WEIGHTS (best.pt)")
+        device = os.environ.get("TRUCK_DEVICE") or device
         self.weights, self.conf, self.device, self.max_det, self.tta = weights, conf, device, max_det, hflip_tta
         self.model = YOLO(weights)
         self.imgsz = imgsz or int(os.environ.get("TRUCK_IMGSZ") or self.model.overrides.get("imgsz", 800))
