@@ -16,6 +16,7 @@ export function PlaybackIcon({ name }) {
     loop: <><path d="M3 8V5h12l-3-3M17 12v3H5l3 3" /></>,
     target: <><circle cx="10" cy="10" r="5" /><path d="M10 1v5M10 14v5M1 10h5M14 10h5" /></>,
     overview: <><path d="m10 3 8 4-8 4-8-4ZM2 11l8 4 8-4M2 15l8 4 8-4" /></>,
+    route: <><circle cx="4" cy="15" r="2" /><circle cx="16" cy="5" r="2" /><path d="M4 13V8a3 3 0 0 1 3-3h3a3 3 0 0 1 0 6H9a3 3 0 0 0 0 6h4a3 3 0 0 0 3-3V7" /></>,
   };
   return <svg viewBox="0 0 20 20" aria-hidden="true">{paths[name]}</svg>;
 }

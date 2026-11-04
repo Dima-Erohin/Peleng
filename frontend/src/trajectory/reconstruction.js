@@ -162,5 +162,5 @@ export function reconstructDataset(dataset, imageTracks = dataset.imageTracks) {
   const result = createDataset(tracks, { ...dataset, imageTracks });
   const start = imageTracks.length ? Math.min(0, result.start) : result.start;
   const end = Math.max(result.end, ...imageTracks.map((view) => (view.frame_count - 1) / view.fps));
-  return { ...result, start, end, duration: end - start, reconstructions };
+  return { ...result, start, end, duration: end - start, reconstructions, truckObservations: dataset.truckObservations };
 }
