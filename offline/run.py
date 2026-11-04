@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import platform
 import subprocess
 import sys
@@ -259,6 +260,7 @@ def run_object(ds, spec: dict, n: int, out_root: Path, a) -> dict:
         r = spec["roi"]
         refiner = RoiRefiner(r.get("weights", "yolo11m.pt"), imgsz=r.get("imgsz", 640), classes=tuple(r.get("classes", ())),
                              conf=r.get("conf", 0.1),
+                             device=os.environ.get("TRUCK_DEVICE") or "cpu",
                              cache_path=out / f"roi_cache_{Path(r.get('weights', 'yolo11m.pt')).stem}_{r.get('imgsz', 640)}.json")
     res, _, used, all_tracks = track(ds, frames, cfg, n, refiner, log=lambda m: print(m, flush=True),
                                      multi=int(spec.get("multi", 0)),

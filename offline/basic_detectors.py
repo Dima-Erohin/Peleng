@@ -14,6 +14,8 @@
 from __future__ import annotations
 
 import importlib
+import inspect
+import os
 
 import cv2
 import numpy as np
@@ -217,5 +219,9 @@ def make_detector(name: str, **kw) -> Detector:
         return CombinedDetector(YoloDetector(**ykw), BackgroundDetector(**bkw))
     if ":" in name:
         mod, cls = name.split(":", 1)
-        return getattr(importlib.import_module(mod), cls)(**kw)
+        klass = getattr(importlib.import_module(mod), cls)
+        dev = os.environ.get("TRUCK_DEVICE")
+        if dev and "device" not in kw and "device" in inspect.signature(klass).parameters:
+            kw = {**kw, "device": dev}  # GPU-хост: все сети прогона на видеокарте (TRUCK_DEVICE=0)
+        return klass(**kw)
     raise ValueError(f"неизвестный детектор {name}")
