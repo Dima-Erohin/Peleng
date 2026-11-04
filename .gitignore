@@ -34,3 +34,4 @@ Thumbs.db
 # обученный детектор позы грузовика для онлайн-прогона (offline/online.py) — в git
 !models/truck_pose_All.pt
 /scene2.7z
+!models/truck_pose_All_yolo11m-pose_1280.pt
