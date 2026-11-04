@@ -22,6 +22,7 @@ export default function TrajectoryWorkspace({ active, navigation }) {
   const dataInputRef = useRef(null);
   const videoInputRef = useRef(null);
   const observationInputRef = useRef(null);
+  const settingsToggleRef = useRef(null);
   const objectUrls = useRef([]);
   const request = useRef(null);
   const [engineReady, setEngineReady] = useState(false);
@@ -35,6 +36,7 @@ export default function TrajectoryWorkspace({ active, navigation }) {
   const [loop, setLoop] = useState(true);
   const [follow, setFollow] = useState(true);
   const [showRoute, setShowRoute] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [selectedId, setSelectedId] = useState("");
   const [hiddenTracks, setHiddenTracks] = useState([]);
   const [stats, setStats] = useState(null);
@@ -53,6 +55,15 @@ export default function TrajectoryWorkspace({ active, navigation }) {
   const selectedObservation = dataset?.reconstructions?.find((item) => item.id === selectedId);
   const truckPoint = online ? online.stats?.last : observationAt(dataset?.truckObservations?.points || [], time);
   const quality = trackingQuality(truckPoint, time);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const onKeyDown = (event) => {
+      if (event.key === "Escape") { setSettingsOpen(false); settingsToggleRef.current?.focus(); }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [settingsOpen]);
 
   const releaseVideos = () => {
     objectUrls.current.forEach((value) => URL.revokeObjectURL(value));
@@ -294,15 +305,24 @@ export default function TrajectoryWorkspace({ active, navigation }) {
     setHiddenTracks((values) => values.includes(id) ? values.filter((value) => value !== id) : [...values, id]);
   };
   const ready = Boolean(dataset && engineReady && modelReady && !loading);
+  const closeSettings = () => { setSettingsOpen(false); settingsToggleRef.current?.focus(); };
 
   return (
-    <main className="app-shell replay-shell">
+    <main className="app-shell replay-shell dashboard-shell">
       <BrandHeader connected={ready} status={loading ? "Загрузка данных…" : online ? `Онлайн-прогон · ${online.status}` : playing ? "Воспроизведение" : "Траектории · пауза"}
         mode={online ? "Онлайн" : "Траектории"} detector={online ? `${online.info.weights} · ${online.info.device}` : "CSV / SVG / 2D → 3D"}>{navigation}</BrandHeader>
+      <div className="dashboard-toolbar">
+        <div className="dashboard-object-select"><span>ОБЪЕКТ</span><Select label="Выбранный объект" value={selectedId} onChange={selectTrack} disabled={!ready}
+          options={[...(dataset?.tracks || []), ...(liveTrack ? [liveTrack] : []), ...pendingObjects].map((item) => ({ value: item.id, label: item.name }))} /></div>
+        <span className="dashboard-mode">{online ? `${online.status} · ${online.stats?.rate?.toFixed(1) || "—"} Гц · ${online.stats?.lagMs ?? "—"} мс` : "ЗАПИСЬ · СИНХРОННОЕ ВОСПРОИЗВЕДЕНИЕ"}</span>
+        <button type="button" className="dashboard-settings-toggle" ref={settingsToggleRef} aria-expanded={settingsOpen} aria-controls="dashboard-settings"
+          onClick={() => setSettingsOpen(!settingsOpen)}>Данные и объекты <span>{settingsOpen ? "×" : "+"}</span></button>
+      </div>
       <div className="replay-workspace">
         <section className="replay-main">
           <div className="replay-scene">
             <div className="replay-canvas" ref={containerRef} />
+            {error && <div className="replay-error dashboard-error" role="alert"><b>Не удалось выполнить действие</b><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="Закрыть сообщение">×</button></div>}
             <div className="replay-scene-top">
               <div className="scene-title"><span>ПРОСТРАНСТВЕННЫЙ ТРЕКИНГ</span><h1>{dataset?.name || "Загрузка сцены"}</h1>
                 <p>{dataset ? `Объектов: ${dataset.tracks.length + pendingObjects.length} · камер: ${dataset.cameras.length} · Z вверх · метры` : "Подготовка траекторий и 3D-модели"}</p></div>
@@ -334,10 +354,28 @@ export default function TrajectoryWorkspace({ active, navigation }) {
           <PlaybackControls dataset={dataset} time={time} playing={playing} rate={rate} loop={loop} disabled={!ready || Boolean(online)} fps={dataset?.fps || 30}
             onPlay={play} onSeek={seek} onStep={step} onRate={setRate} onLoop={setLoop} />
         </section>
-        <aside className="replay-sidebar">
-          {error && <div className="replay-error" role="alert"><b>Не удалось выполнить действие</b><span>{error}</span><button type="button" onClick={() => setError("")} aria-label="Закрыть сообщение">×</button></div>}
+        <section className="dashboard-media" aria-label="Видео и пространственный обзор">
+          <CameraVideo clips={clips} imageTracks={dataset?.imageTracks || []} time={time} playing={playing} rate={rate} active={active}
+            observations={dataset?.truckObservations} onlinePoint={online?.stats?.last} online={Boolean(online)} onlineInfo={online?.info} />
           {dataset && <Minimap dataset={dataset} liveTrack={liveTrack} hiddenTracks={hiddenTracks}
             selectedId={selectedId} time={time} onSelect={selectTrack} />}
+        </section>
+        <section className="dashboard-telemetry" aria-label="Телеметрия выбранного объекта">
+          <div className="dashboard-position">
+            <div className="replay-section-heading"><h2>Положение объекта</h2><span>XYZ · МЕТРЫ</span></div>
+            <div className="xyz-readout">
+              {["x", "y", "z"].map((axis) => <div key={axis}><span>{axis.toUpperCase()}</span><b>{sample.visible ? Math.abs(sample[axis]) < 0.005 ? "0.00" : sample[axis].toFixed(2) : "—"}</b><small>м</small></div>)}
+            </div>
+          </div>
+          <div className="dashboard-motion">
+            <div className="replay-section-heading"><h2>Движение</h2><span>ИСХОДНЫЕ XYZ</span></div>
+            <div className="motion-readout"><span>Скорость<b>{sample.visible && sample.motionAvailable !== false ? sample.speed.toFixed(2) : "—"} <small>м/с</small></b></span><span>Пройдено<b>{sample.visible && sample.motionAvailable !== false ? sample.distance.toFixed(1) : "—"} <small>м</small></b></span></div>
+            {(online || dataset?.truckObservations?.trajectoryMatches) && <span className={`dashboard-quality is-${quality.level}`}>{quality.label}</span>}
+          </div>
+          <CoordinateChart track={track} time={time} />
+        </section>
+        <aside id="dashboard-settings" className="replay-sidebar dashboard-settings" hidden={!settingsOpen} aria-label="Данные и объекты">
+          <div className="dashboard-settings-heading"><h2>Данные и объекты</h2><button type="button" aria-label="Закрыть настройки" onClick={closeSettings}>×</button></div>
           {online && (
             <section className="replay-source online-run" aria-label="Онлайн-прогон">
               <div className="replay-section-heading"><h2>Онлайн-прогон</h2><span>{online.status.toUpperCase()}</span></div>
@@ -404,16 +442,6 @@ export default function TrajectoryWorkspace({ active, navigation }) {
               </div>
             ))}
           </section>
-          <section className="replay-coordinates">
-            <div className="replay-section-heading"><h2>Положение объекта</h2><span>МИРОВЫЕ XYZ</span></div>
-            <div className="xyz-readout">
-              {["x", "y", "z"].map((axis) => <div key={axis}><span>{axis.toUpperCase()}</span><b>{sample.visible ? Math.abs(sample[axis]) < 0.005 ? "0.00" : sample[axis].toFixed(2) : "—"}</b><small>м</small></div>)}
-            </div>
-            <div className="motion-readout"><span>Скорость<b>{sample.visible && sample.motionAvailable !== false ? sample.speed.toFixed(2) : "—"} <small>м/с</small></b></span><span>Пройдено<b>{sample.visible && sample.motionAvailable !== false ? sample.distance.toFixed(1) : "—"} <small>м</small></b></span></div>
-            <CoordinateChart track={track} time={time} />
-          </section>
-          <CameraVideo clips={clips} imageTracks={dataset?.imageTracks || []} time={time} playing={playing} rate={rate} active={active}
-            observations={dataset?.truckObservations} onlinePoint={online?.stats?.last} online={Boolean(online)} onlineInfo={online?.info} />
           <footer className="replay-footer"><span>PELENG / TRAJECTORY LAB</span><span>{stats ? `${stats.calls} draw calls · ${(stats.triangles / 1000).toFixed(1)}K triangles` : "WebGL"}</span></footer>
         </aside>
       </div>
