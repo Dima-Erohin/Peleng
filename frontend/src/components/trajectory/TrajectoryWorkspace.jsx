@@ -4,6 +4,7 @@ import { Button } from "../ui";
 import { Select } from "../Dropdown";
 import PlaybackControls, { PlaybackIcon } from "./PlaybackControls";
 import CoordinateChart from "./CoordinateChart";
+import TrackingPerformance from "./TrackingPerformance";
 import CameraVideo from "./CameraVideo";
 import ReconstructionPanel from "./ReconstructionPanel";
 import MotionWaveform from "./MotionWaveform";
@@ -372,7 +373,7 @@ export default function TrajectoryWorkspace({ active, navigation }) {
             <div className="motion-readout"><span>Скорость<b>{sample.visible && sample.motionAvailable !== false ? sample.speed.toFixed(2) : "—"} <small>м/с</small></b></span><span>Пройдено<b>{sample.visible && sample.motionAvailable !== false ? sample.distance.toFixed(1) : "—"} <small>м</small></b></span></div>
             {(online || dataset?.truckObservations?.trajectoryMatches) && <span className={`dashboard-quality is-${quality.level}`}>{quality.label}</span>}
           </div>
-          <CoordinateChart track={track} time={time} />
+          <TrackingPerformance dataset={dataset} points={online?.points} live={Boolean(online)} time={time} />
         </section>
         <aside id="dashboard-settings" className="replay-sidebar dashboard-settings" hidden={!settingsOpen} aria-label="Данные и объекты">
           <div className="dashboard-settings-heading"><h2>Данные и объекты</h2><button type="button" aria-label="Закрыть настройки" onClick={closeSettings}>×</button></div>
@@ -441,6 +442,10 @@ export default function TrajectoryWorkspace({ active, navigation }) {
                 </button>
               </div>
             ))}
+          </section>
+          <section className="replay-coordinates">
+            <div className="replay-section-heading"><h2>Графики координат</h2><span>ВЫБРАННЫЙ ОБЪЕКТ</span></div>
+            <CoordinateChart track={track} time={time} />
           </section>
           <footer className="replay-footer"><span>PELENG / TRAJECTORY LAB</span><span>{stats ? `${stats.calls} draw calls · ${(stats.triangles / 1000).toFixed(1)}K triangles` : "WebGL"}</span></footer>
         </aside>

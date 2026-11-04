@@ -1,7 +1,8 @@
 import { sampleTrack } from "./data.js";
 
-export function trackingPerformance({ reference, estimate, points = [], live = false }) {
-  return points.map((point, index) => {
+export function trackingPerformance({ reference, estimate, points, live = false }) {
+  const samples = points ?? (!live && estimate ? Array.from(estimate.times, (t) => ({ t })) : []);
+  return samples.map((point, index) => {
     let error = null;
     const expected = reference && sampleTrack(reference, point.t);
     const actual = live
@@ -13,7 +14,7 @@ export function trackingPerformance({ reference, estimate, points = [], live = f
       error = Math.hypot(actual.x - expected.x, actual.y - expected.y, actual.z - expected.z);
     }
     const first = Math.max(0, index - 9);
-    const span = point.t - points[first].t;
+    const span = point.t - samples[first].t;
     const hz = live && index > first && span > 0 ? (index - first) / span : null;
     return { t: point.t, error, hz };
   });

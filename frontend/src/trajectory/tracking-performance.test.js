@@ -25,6 +25,14 @@ test("frequency uses latest 10 processed timestamps, not inverse computation dur
   assert.equal(rows.at(-1).error, null);
 });
 
+test("recorded error uses the current estimate timestamps without historical observation metadata", () => {
+  const estimate = createTrack({ id: "estimate", units: "m", maxGap: 2,
+    samples: [0, 1, 2].map((t) => ({ t, position: [t, 3, 4] })) });
+  const rows = trackingPerformance({ reference, estimate });
+  assert.deepEqual(rows.map(({ t, error, hz }) => [t, error, hz]), [[0, 5, null], [1, 5, null], [2, 5, null]]);
+  assert.deepEqual(trackingPerformance({ reference }), []);
+});
+
 test("missing XYZ and reference gaps never become zero error or connected lines", () => {
   const points = [{ t: 0, mode: "none", pos: [0, 0, 0] }, { t: 1, mode: "tri" },
     { t: 3, mode: "tri", pos: [0, 0, 0] }];
