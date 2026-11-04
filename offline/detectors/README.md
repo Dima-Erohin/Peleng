@@ -132,3 +132,12 @@ imgsz 640, batch 8 для 750 кадров → для 1126 кадров ≈ 7 м
 Память: batch 8 при 640 укладывается в 16 ГБ с запасом (около 3–4 ГБ).
 Проверка качества (опционально, в том же venv): `python -I offline\detectors\eval_truck_pose.py --weights <pt> --list <Out>\truck_ds\lists\valAll.txt --imgsz 640`
 (valAll — часть тех же камер, не отложенная — это лишь контроль). Эксперименты A/B (отложенная камера): `-Exp A` / `-Exp B`.
+
+## Обучение на GPU (Linux, NVIDIA)
+Из корня репозитория:
+```bash
+bash offline/detectors/run_truck_train_gpu.sh --data /path/to/project2 --out /path/to/truck_train
+```
+По умолчанию: `yolo11m-pose`, imgsz 1280, 100 эпох, batch 16, каждый кадр (`--stride 1`), `--device 0`.
+Скрипт ставит torch с CUDA 12.4 в `<out>/venv`, собирает датасет, обучает; повторный запуск продолжает с последней эпохи.
+Веса: `<out>/RESULT/truck_pose_<name>.pt`. Нехватка памяти — уменьшить `--batch` (8) или `--imgsz` (960).
